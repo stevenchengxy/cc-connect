@@ -22,7 +22,7 @@ function setup(t) {
   addRoom(room);
   const state={global:0,personal:0,records:false,issues:[],revocations:[],queries:[],owner:true,meter:true,revoke:true};
   t.mock.method(globalThis,'fetch',async(url,init)=>{
-    assert.equal(init.redirect,'error');
+    assert.equal(init.redirect,'manual');
     if (url==='https://api.cloudflare.com/client/v4/graphql') {
       assert.equal(init.headers.authorization,'Bearer '+env.CC_CF_ANALYTICS_TOKEN);
       const {query}=JSON.parse(init.body);state.queries.push(query);
@@ -209,4 +209,32 @@ test('logout cancels credentials for both endpoints of just that login’s rooms
   assert.equal(f.state.revocations.length,0);
   await closeSessionRelay(f.env,f.host);
   assert.equal(f.state.revocations.length,2);
+});
+
+test('admin diagnostics show provider status and numeric code without disclosing its body or credential', async t => {
+  const f=setup(t), echoedSecret='synthetic-provider-error-detail';
+  t.mock.method(globalThis,'fetch',async(url,init)=>{
+    assert.equal(init.redirect,'manual');
+    return Response.json({errors:[{code:10000,message:echoedSecret}]},{status:403});
+  });
+  const view=await (await f.adminRequest('GET','usage')).json();
+  assert.equal(view.meterStatus,'unavailable');
+  assert.deepEqual(view.meterDiagnostic,{stage:'analytics',reason:'http',httpStatus:403,providerCode:10000});
+  const enabled=await f.adminRequest('PATCH','quotas/global',{mode:'protected',limitBytes:1000,maxConcurrent:1});
+  assert.equal(enabled.status,503);
+  const response=await enabled.text();
+  assert.ok(!response.includes(echoedSecret) && !response.includes(f.env.CC_CF_ANALYTICS_TOKEN));
+  assert.equal((await f.adminRequest('GET','usage',null,{id:f.host,role:'member',status:'approved'})).status,403);
+});
+
+test('authenticated provider reads treat redirects as failures and never request the redirect destination', async t => {
+  const f=setup(t), observed=[];
+  t.mock.method(globalThis,'fetch',async(url,init)=>{
+    observed.push(url);assert.equal(init.redirect,'manual');
+    return new Response(null,{status:302,headers:{Location:'https://redirect.example.test/'}});
+  });
+  const view=await (await f.adminRequest('GET','usage')).json();
+  assert.deepEqual(view.meterDiagnostic,{stage:'analytics',reason:'http',httpStatus:302});
+  assert.deepEqual(observed,['https://api.cloudflare.com/client/v4/graphql']);
+  assert.deepEqual((await f.grant()).status,204);
 });

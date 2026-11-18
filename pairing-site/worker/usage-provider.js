@@ -14,7 +14,7 @@ export function accountIdentifier(id) {
 }
 
 async function jsonBody(response, max = 16384) {
-  if (!response.ok || !response.body) throw Error('Provider unavailable');
+  if (!response.body) throw Error('Provider unavailable');
   const reader = response.body.getReader(), decoder = new TextDecoder();
   let n = 0, text = '';
   for (;;) {
@@ -40,21 +40,55 @@ export function periodAt(now, day = '1') {
 }
 
 const DAY = 86400000;
-class GraphQLQueryError extends Error {}
+class ProviderFailure extends Error {
+  constructor(stage, reason, httpStatus, providerCode) {
+    super(reason);
+    this.diagnostic = {stage,reason};
+    if (Number.isInteger(httpStatus)) this.diagnostic.httpStatus = httpStatus;
+    if (Number.isSafeInteger(providerCode)) this.diagnostic.providerCode = providerCode;
+  }
+}
+class GraphQLQueryError extends ProviderFailure {}
+// Only the fixed, application-owned fields on ProviderFailure cross into the admin API.
+export const meterDiagnostic = error => error instanceof ProviderFailure ? error.diagnostic :
+  {stage:'usage',reason:'unavailable'};
+
+async function readProviderJSON(stage,url,init) {
+  let response;
+  try {
+    // Workers rejects redirect:"error" before sending anything. Manual mode
+    // returns the 3xx to us and never forwards the operator's Authorization.
+    response = await fetch(url,{...init,redirect:'manual',signal:AbortSignal.timeout(4500)});
+  } catch (error) {
+    const timeout = error?.name === 'TimeoutError' || error?.name === 'AbortError';
+    throw new ProviderFailure(stage,timeout ? 'timeout' : 'transport');
+  }
+  if (!response.ok) {
+    let code;
+    // Provider error messages may echo request data. Retain numeric codes only.
+    if (response.headers.get('content-type')?.includes('application/json') && response.body) {
+      try { code=(await jsonBody(response)).errors?.[0]?.code; }
+      catch { /* Oversize, malformed or unavailable error bodies need no additional detail. */ }
+    } else { await response.body?.cancel(); }
+    throw new ProviderFailure(stage,'http',response.status,code);
+  }
+  try { return await jsonBody(response); }
+  catch { throw new ProviderFailure(stage,'response',response.status); }
+}
 async function queryAccount(env,fields) {
   const tag = env.CC_CF_ACCOUNT_ID;
-  if (!idPattern.test(tag || '') || !authorized(env.CC_CF_ANALYTICS_TOKEN)) throw Error('Meter unavailable');
+  if (!idPattern.test(tag || '')) throw new ProviderFailure('analytics','account_binding');
+  if (!authorized(env.CC_CF_ANALYTICS_TOKEN)) throw new ProviderFailure('analytics','token_binding');
   const query = `query {viewer {accounts(filter:{accountTag:"${tag}"}) {accountTag ${fields}}}}`;
-  const response = await fetch('https://api.cloudflare.com/client/v4/graphql',{
-    method:'POST', redirect:'error', signal:AbortSignal.timeout(4500),
+  const result = await readProviderJSON('analytics','https://api.cloudflare.com/client/v4/graphql',{
+    method:'POST',
     headers:{authorization:'Bearer '+env.CC_CF_ANALYTICS_TOKEN,'content-type':'application/json'},
     body:JSON.stringify({query})
   });
-  const result = await jsonBody(response);
-  if (Array.isArray(result?.errors) && result.errors.length) throw new GraphQLQueryError('Query declined');
+  if (Array.isArray(result?.errors) && result.errors.length) throw new GraphQLQueryError('analytics','graphql',undefined,result.errors[0]?.extensions?.code);
   const accounts = result?.data?.viewer?.accounts;
   if ((result.errors != null && !Array.isArray(result.errors)) || !Array.isArray(accounts) ||
-      accounts.length !== 1 || accounts[0]?.accountTag !== tag) throw Error('Meter unavailable');
+      accounts.length !== 1 || accounts[0]?.accountTag !== tag) throw new ProviderFailure('analytics','account_response');
   return accounts[0];
 }
 
@@ -141,7 +175,7 @@ export const issuerConfigured = env => idPattern.test(env.CC_CF_TURN_KEY_ID || '
 export async function issueTurn(env, accountId, ttl) {
   if (!Number.isSafeInteger(ttl) || ttl < 5 || ttl > 120) throw Error('Invalid lifetime');
   const url = credentialEndpoint(env,env.CC_CF_TURN_KEY_ID)+'generate';
-  const response = await fetch(url,{method:'POST',redirect:'error',signal:AbortSignal.timeout(4000),
+  const response = await fetch(url,{method:'POST',redirect:'manual',signal:AbortSignal.timeout(4000),
     headers:{authorization:'Bearer '+env.CC_CF_TURN_API_TOKEN,'content-type':'application/json'},
     body:JSON.stringify({ttl, customIdentifier:accountIdentifier(accountId)})});
   if (response.status !== 201) throw Error('TURN unavailable');
@@ -160,7 +194,7 @@ export async function issueTurn(env, accountId, ttl) {
 export async function revokeTurn(env, keyId, username) {
   if (typeof username !== 'string' || !/^[a-zA-Z0-9:_=-]{1,512}$/.test(username)) throw Error('Invalid credential');
   const url = credentialEndpoint(env,keyId)+encodeURIComponent(username)+'/revoke';
-  const response = await fetch(url,{method:'POST',redirect:'error',signal:AbortSignal.timeout(3500),
+  const response = await fetch(url,{method:'POST',redirect:'manual',signal:AbortSignal.timeout(3500),
     headers:{authorization:'Bearer '+env.CC_CF_TURN_API_TOKEN}});
   await response.body?.cancel();
   if (response.status !== 204) throw Error('Revocation not confirmed');
@@ -168,10 +202,9 @@ export async function revokeTurn(env, keyId, username) {
 
 export async function verifyKeyOwner(env) {
   const tag = env.CC_CF_ACCOUNT_ID, key = env.CC_CF_TURN_KEY_ID;
-  if (!idPattern.test(tag || '') || !idPattern.test(key || '') || !authorized(env.CC_CF_ANALYTICS_TOKEN)) throw Error('Meter unavailable');
-  const response = await fetch('https://api.cloudflare.com/client/v4/accounts/'+tag+'/calls/turn_keys/'+key,{
-    redirect:'error',signal:AbortSignal.timeout(4500),headers:{authorization:'Bearer '+env.CC_CF_ANALYTICS_TOKEN}
+  if (!idPattern.test(tag || '') || !idPattern.test(key || '') || !authorized(env.CC_CF_ANALYTICS_TOKEN)) throw new ProviderFailure('turn_key','binding');
+  const data = await readProviderJSON('turn_key','https://api.cloudflare.com/client/v4/accounts/'+tag+'/calls/turn_keys/'+key,{
+    headers:{authorization:'Bearer '+env.CC_CF_ANALYTICS_TOKEN}
   });
-  const data = await jsonBody(response);
-  if (data?.success !== true || data.result?.uid !== key) throw Error('TURN key ownership unconfirmed');
+  if (data?.success !== true || data.result?.uid !== key) throw new ProviderFailure('turn_key','ownership');
 }

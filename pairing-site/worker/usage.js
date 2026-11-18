@@ -1,4 +1,4 @@
-import {accountPattern, readTurnUsage, issueTurn, revokeTurn, verifyKeyOwner, issuerConfigured} from './usage-provider.js';
+import {accountPattern, readTurnUsage, issueTurn, revokeTurn, verifyKeyOwner, issuerConfigured, meterDiagnostic} from './usage-provider.js';
 
 const headers = {'cache-control':'no-store','x-content-type-options':'nosniff'};
 const reply = (status, data) => data === undefined ? new Response(null,{status,headers}) : Response.json(data,{status,headers});
@@ -157,14 +157,15 @@ async function activeCount(db,scope) {
 }
 async function usageView(env,scope,enforce = true) {
   const [policy, global, activeGrants] = await Promise.all([quota(env.DB,scope),quota(env.DB,'global'),activeCount(env.DB,scope)]);
-  let usage = null;
+  let usage = null, diagnostic;
   try { usage = await meter(env,scope); }
-  catch { /* Unavailable and a successful zero-record query are distinct. */ }
+  catch (error) { diagnostic = meterDiagnostic(error); }
   if (enforce && activeGrants && (!usage || usage.highWaterEgressBytes >= limit(policy.limit_bytes))) {
     await revokeMatching(env,scope === 'global' ? 'global' : 'account',scope);
   }
   return {scope,mode:global.mode,limitBytes:policy.limit_bytes,maxConcurrent:policy.max_concurrent,
-    stopAtBytes:limit(policy.limit_bytes),meterStatus:usage ? 'ok':'unavailable',usage,activeGrants};
+    stopAtBytes:limit(policy.limit_bytes),meterStatus:usage ? 'ok':'unavailable',usage,activeGrants,
+    ...(diagnostic ? {meterDiagnostic:diagnostic} : {})};
 }
 async function smallJSON(request) {
   if (request.headers.get('content-type')?.split(';')[0] !== 'application/json' || !request.body) return null;
@@ -208,11 +209,11 @@ export async function usageAdmin(request,env,actor) {
   if (scope==='global' && mode==='protected') {
     if (limit(bytes)<=0 || !concurrency) return reply(400);
     if (prev.mode!=='protected' || bytes>prev.limit_bytes || concurrency>prev.max_concurrent) {
-      if (!issuerConfigured(env)) return reply(503);
+      if (!issuerConfigured(env)) return reply(503,{error:'relay_unavailable',meterDiagnostic:{stage:'turn_issuer',reason:'binding'}});
       try {
         const [observed]=await Promise.all([meter(env,'global'),verifyKeyOwner(env)]);
         if (observed.highWaterEgressBytes>=limit(bytes)) return reply(409);
-      } catch { return reply(503); }
+      } catch (error) { return reply(503,{error:'relay_unavailable',meterDiagnostic:meterDiagnostic(error)}); }
     }
   }
   const saved=await db.prepare(`INSERT INTO relay_quotas(scope,mode,limit_bytes,max_concurrent,revision)
