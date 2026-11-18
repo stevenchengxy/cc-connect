@@ -51,6 +51,8 @@ Mac 上运行 `npm run dist:mac` 生成 Apple Silicon 和 Intel 通用 DMG。Win
 
 `npm test` 检查直接配对、证书指纹、邀请密钥、同意与拒绝、WSS 转发以及凭据持久化。`npm run test:desktop` 需要图形桌面环境，它启动两个带独立临时配置的 Electron 实例，用合成动画窗口验证配对、拒绝后重新连接、默认仅观看、实际视频解码、传输统计与双端断开。该测试不会采集用户桌面或向系统注入键鼠。
 
+0.3.1 的异网测试在一台 Mac 和独立的 Ubuntu 云主机之间完成了公网配对与授权。两端未配置 TURN，未收到视频帧。另在双 NAT 模拟和强制 TURN 的隔离测试中收到了合成画面。[异网测试记录](https://github.com/stevenchengxy/cc-connect/actions/runs/44282060543)
+
 在这台 Mac 上，还验证了控制通道的鼠标坐标、按键收发、仅观看时的输入隔离和画质切换。Windows 实机键鼠、真实双机跨公网吞吐和延迟仍需在目标设备上验收。
 
 ## 更新

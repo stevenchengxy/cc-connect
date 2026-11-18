@@ -98,3 +98,52 @@ test('only enrolled members receive bounded coturn REST credentials', async t =>
   db.handle.prepare('UPDATE rooms SET expires=0 WHERE id=?').run(id);
   assert.equal((await ice('viewer',viewerToken)).status,403);
 });
+
+test('managed provider is room-scoped and reuses short-lived credentials under concurrent retries', async t => {
+  const db = database(t), { id, send, hostToken, viewerToken } = fixture(db);
+  const ice = (role, bearer) => worker.fetch(new Request(`https://example.test/v1/rooms/${id}/${role}/ice`, {headers:{authorization:'Bearer '+bearer}}), db);
+  const supported = 'turns:turn.cloudflare.com:443?transport=tcp';
+  let calls = 0, onProvider, finishProvider;
+  const started = new Promise(resolve => { onProvider = resolve; });
+  const gate = new Promise(resolve => { finishProvider = resolve; });
+  t.mock.method(globalThis,'fetch', async (endpoint, options) => {
+    calls++;
+    assert.equal(endpoint,`https://rtc.live.cloudflare.com/v1/turn/keys/${db.CC_CF_TURN_KEY_ID}/credentials/generate-ice-servers`);
+    assert.equal(options.redirect,'error'); assert.equal(options.headers.authorization,'Bearer '+db.CC_CF_TURN_API_TOKEN);
+    assert.ok(JSON.parse(options.body).ttl <= 3600);
+    onProvider(); await gate;
+    return Response.json({iceServers:[{urls:['stun:stun.cloudflare.com:3478']},{urls:[supported,'turn:evil.example:3478'], username:'test-member',credential:'test-credential'}]}, {status:201});
+  });
+  await send('host','POST'); await send('viewer','POST');
+  assert.equal((await ice('host',hostToken)).status,204);
+  db.CC_CF_TURN_KEY_ID = randomBytes(16).toString('hex');
+  db.CC_CF_TURN_API_TOKEN = token();
+  assert.equal((await ice('host',viewerToken)).status,403);
+  assert.equal(calls,0);
+  const first = ice('host', hostToken); await started;
+  assert.equal((await ice('host',hostToken)).status,503);
+  finishProvider();
+  const result = await (await first).json();
+  assert.deepEqual(result.iceServers,[{urls:[supported], username:'test-member',credential:'test-credential'}]);
+  assert.ok(result.expiresAt > Date.now() && result.expiresAt <= Date.now()+3_600_000);
+  assert.deepEqual(await (await ice('host',hostToken)).json(),result);
+  assert.equal(calls,1);
+  await send('host','DELETE');
+  assert.equal((await ice('host',hostToken)).status,403);
+  assert.equal(calls,1);
+});
+
+test('provider failures are throttled and secrets and unsupported endpoints are never returned', async t => {
+  const db = database(t), { id, send, hostToken } = fixture(db);
+  await send('host','POST'); await send('viewer','POST');
+  db.CC_CF_TURN_KEY_ID = randomBytes(16).toString('hex'); db.CC_CF_TURN_API_TOKEN = token();
+  let calls=0;
+  t.mock.method(globalThis,'fetch', async () => {
+    calls++;
+    return Response.json({iceServers:[{urls:['turn:untrusted.example:3478'], username:'test-member',credential:db.CC_CF_TURN_API_TOKEN}]}, {status:201});
+  });
+  const ice = () => worker.fetch(new Request(`https://example.test/v1/rooms/${id}/host/ice`, {headers:{authorization:'Bearer '+hostToken}}), db);
+  const response = await ice();
+  assert.equal(response.status,503); assert.equal(await response.text(),'');
+  assert.equal((await ice()).status,503); assert.equal(calls,1);
+});

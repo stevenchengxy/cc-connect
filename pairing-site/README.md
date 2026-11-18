@@ -26,3 +26,14 @@
 客户端在两个角色都已注册的有效房间中使用 `GET /v1/rooms/{房间}/{角色}/ice` 及该角色的 bearer 获取凭据。凭据最长有效 60 分钟，且不超过房间到期时间。服务没有接入 TURN 时返回 204。已签发的凭据在到期前由 coturn 单独验证。长时间会话如果需要重新分配中继，应重新取得有效凭据。
 
 [coturn TURN REST API 文档](https://github.com/coturn/coturn/blob/master/README.turnserver)
+
+## 使用 Cloudflare Realtime TURN
+
+维护者也可以使用 Cloudflare 的托管中继，免去自建公网 TURN 主机。
+
+1. 在自己的 Cloudflare 账户中创建 Realtime TURN Key。检查该账户的带宽额度、计费和用量告警。这个公开配对服务允许持有邀请的一对客户端获取中继凭据，使用量计入维护者的 Cloudflare 账户。
+2. 在配对 Worker 的运行时设置中配置 `CC_CF_TURN_KEY_ID` 和 `CC_CF_TURN_API_TOKEN`，值分别来自该 TURN Key 的 ID 和 API Token。保留其中一种提供商配置。使用 Cloudflare 时清空 `CC_TURN_URLS` 和 `CC_TURN_SECRET`。
+3. 发布数据库迁移与 Worker。两个角色注册后，应用可通过相同的 `/ice` 接口取得有时限的 Cloudflare 凭据。每个角色复用自己的有效凭据，并发请求共用签发锁。服务端在 D1 缓存短期凭据，房间清理时删除。长期 API Token 仅用于 Worker 调用 Cloudflare 的固定 HTTPS 接口。
+4. 使用两个不同网络的设备进行 TURN-only 的画面传输验收，并在供应商控制台核对用量。
+
+[Cloudflare 官方凭据文档](https://developers.cloudflare.com/realtime/turn/generate-credentials/)

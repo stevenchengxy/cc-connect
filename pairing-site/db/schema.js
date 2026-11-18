@@ -19,3 +19,13 @@ export const messages = sqliteTable('messages', {
   size: integer('size').notNull(),
   digest: text('digest').notNull()
 }, t => [primaryKey({ columns:[t.room,t.sender,t.seq] })]);
+
+// One short-lived credential cache entry and one issuance lease per member.
+export const turnGrants = sqliteTable('turn_grants', {
+  room: text('room').notNull().references(() => rooms.id, {onDelete:'cascade'}),
+  role: text('role').notNull(),
+  lease: text('lease').notNull(),
+  retryAt: integer('retry_at').notNull(),
+  expires: integer('expires').notNull().default(0),
+  payload: text('payload')
+}, t => [primaryKey({ columns:[t.room,t.role] })]);

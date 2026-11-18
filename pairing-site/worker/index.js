@@ -52,9 +52,9 @@ async function register(db, request, id, role, token, now) {
   return reply(result.meta.changes ? 201 : 409);
 }
 
-async function packetBody(request) {
+async function boundedBytes(request, limit, minimum) {
   const declared = request.headers.get('content-length');
-  if (declared !== null && (!/^\d+$/.test(declared) || Number(declared) > MAX_PACKET)) return null;
+  if (declared !== null && (!/^\d+$/.test(declared) || Number(declared) > limit)) return null;
   const reader = request.body?.getReader();
   if (!reader) return null;
   const chunks = [];
@@ -63,10 +63,10 @@ async function packetBody(request) {
     const { value, done } = await reader.read();
     if (done) break;
     size += value.byteLength;
-    if (size > MAX_PACKET) { await reader.cancel(); return null; }
+    if (size > limit) { await reader.cancel(); return null; }
     chunks.push(value);
   }
-  if (size < 50) return null;
+  if (size < minimum) return null;
   const bytes = new Uint8Array(size);
   let offset = 0;
   for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
@@ -88,7 +88,7 @@ async function submit(db, request, id, role, token, seq, now) {
   if (request.headers.get('content-type')?.split(';')[0].toLowerCase() !== 'application/octet-stream') return reply(415);
   const room = await db.prepare(`SELECT closed,expires FROM rooms WHERE id=? AND ${role}=?`).bind(id, token).first();
   if (!room || room.closed || room.expires <= now) return reply(410);
-  const bytes = await packetBody(request);
+  const bytes = await boundedBytes(request, MAX_PACKET, 50);
   if (!bytes) return reply(413);
   const digest = await fingerprint(bytes);
   // The INSERT atomically enforces ordering, total bytes and the room lifetime.
@@ -115,10 +115,65 @@ function turnURLs(value) {
   return urls;
 }
 
+const cloudflareUrls = new Set([
+  'turn:turn.cloudflare.com:3478?transport=udp', 'turn:turn.cloudflare.com:443?transport=udp',
+  'turn:turn.cloudflare.com:3478?transport=tcp', 'turn:turn.cloudflare.com:80?transport=tcp',
+  'turns:turn.cloudflare.com:5349?transport=tcp', 'turns:turn.cloudflare.com:443?transport=tcp'
+]);
+
+async function requestCloudflareGrant(env, ttl) {
+  // Fixed origin, strict key id and redirect policy keep the operator token on the provider's API.
+  const endpoint = 'https://rtc.live.cloudflare.com/v1/turn/keys/' + env.CC_CF_TURN_KEY_ID + '/credentials/generate-ice-servers';
+  const response = await fetch(endpoint, {
+    method: 'POST', redirect: 'error', signal: AbortSignal.timeout(4000),
+    headers: { authorization: 'Bearer ' + env.CC_CF_TURN_API_TOKEN, 'content-type': 'application/json' },
+    body: JSON.stringify({ ttl })
+  });
+  if (response.status !== 201) throw Error('Provider unavailable');
+  const bytes = await boundedBytes(response, 16 * 1024, 1);
+  if (!bytes) throw Error('Invalid provider response');
+  const payload = JSON.parse(new TextDecoder().decode(bytes));
+  if (!Array.isArray(payload.iceServers) || payload.iceServers.length > 8) throw Error('Invalid provider response');
+  for (const server of payload.iceServers) {
+    if (!Array.isArray(server?.urls) || typeof server.username !== 'string' || typeof server.credential !== 'string') continue;
+    if (!/^[!-~]{1,512}$/.test(server.username) || !/^[!-~]{1,512}$/.test(server.credential)) continue;
+    const urls = [...new Set(server.urls.filter(url => cloudflareUrls.has(url)))];
+    if (urls.length) return [{ urls, username: server.username, credential: server.credential }];
+  }
+  throw Error('No supported TURN endpoint');
+}
+
+async function cloudflareCredentials(env, id, role, token, now, roomExpiry) {
+  if (!/^[a-fA-F0-9-]{32,36}$/.test(env.CC_CF_TURN_KEY_ID || '') ||
+      !/^[!-~]{16,2048}$/.test(env.CC_CF_TURN_API_TOKEN || '')) return reply(503);
+  const cache = await env.DB.prepare('SELECT retry_at,expires,payload FROM turn_grants WHERE room=? AND role=?')
+    .bind(id,role).first();
+  if (cache?.payload && cache.expires > now) return Response.json(JSON.parse(cache.payload), {headers});
+  if (cache?.retry_at > now) return reply(503);
+  const lease = crypto.randomUUID();
+  // A single atomic lease per role also caps retries after a provider outage.
+  const claimed = await env.DB.prepare(`INSERT INTO turn_grants(room,role,lease,retry_at) VALUES(?,?,?,?)
+    ON CONFLICT(room,role) DO UPDATE SET lease=excluded.lease,retry_at=excluded.retry_at,expires=0,payload=NULL
+    WHERE retry_at<=? AND expires<=?`).bind(id, role, lease, now+60_000, now, now).run();
+  if (!claimed.meta.changes) return reply(503);
+  const ttl = Math.min(3600, Math.floor((roomExpiry - now) / 1000));
+  if (ttl < 1) return reply(403);
+  const iceServers = await requestCloudflareGrant(env, ttl);
+  const result = {iceServers, expiresAt: now + ttl * 1000};
+  const stored = await env.DB.prepare(`UPDATE turn_grants SET expires=?,payload=? WHERE room=? AND role=? AND lease=?
+    AND EXISTS(SELECT 1 FROM rooms WHERE id=? AND ${role}=? AND closed=0 AND viewer IS NOT NULL AND expires>?)`)
+    .bind(result.expiresAt, JSON.stringify(result), id, role, lease, id, token, Date.now()).run();
+  return stored.meta.changes ? Response.json(result, {headers}) : reply(403);
+}
+
 async function iceCredentials(env, id, role, token, now) {
   const room = await env.DB.prepare(`SELECT expires FROM rooms WHERE id=? AND ${role}=? AND viewer IS NOT NULL AND closed=0 AND expires>?`)
     .bind(id, token, now).first();
   if (!room) return reply(403);
+  if (env.CC_CF_TURN_KEY_ID || env.CC_CF_TURN_API_TOKEN) {
+    if (env.CC_TURN_URLS || env.CC_TURN_SECRET) return reply(503);
+    return cloudflareCredentials(env, id, role, token, now, room.expires);
+  }
   if (!env.CC_TURN_URLS && !env.CC_TURN_SECRET) return reply(204);
   if (typeof env.CC_TURN_SECRET !== 'string' || env.CC_TURN_SECRET.length < 32) return reply(503);
   const urls = turnURLs(env.CC_TURN_URLS);
