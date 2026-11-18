@@ -103,3 +103,14 @@ test('logout racing a credential-store write cannot restore an earlier signed-in
   assert.equal(app.approvedToken,null)
   await assert.rejects(fs.access(app.file),{code:'ENOENT'})
 })
+
+test('verified role reaches the desktop view and resets when privileges change', async t => {
+  const f = await fixture(t), app = f.create()
+  Object.assign(f.data.account, {status:'approved',role:'admin'})
+  assert.equal((await app.login(credentials)).role,'admin')
+  assert.equal((await f.create().restore()).role,'admin')
+  f.data.account.role='member'
+  assert.equal((await app.refresh()).role,'member')
+  await app.logout()
+  assert.notEqual(app.state.role,'admin')
+})

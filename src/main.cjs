@@ -9,6 +9,7 @@ const { PairingNetwork } = require('./network.cjs')
 const { InputBridge } = require('../native/bridge.cjs')
 const { Settings } = require('./settings.cjs')
 const { DesktopAccount, messages } = require('./account.cjs')
+const { AdminConsole } = require('./admin-console.cjs')
 const { Updater } = require('./updater.cjs')
 const { systemUpdateTransport } = require('./update-transport.cjs')
 
@@ -33,6 +34,7 @@ function nativeText(zh, tw, en) {
 let window
 let preferences
 let account
+let adminConsole
 let current
 let tray
 let saveInProgress = false
@@ -211,6 +213,7 @@ function registerHandlers() {
   handle('account-login', values => account.login(values))
   handle('account-register', values => account.register(values))
   handle('account-refresh', () => account.refresh())
+  handle('open-admin-console', () => adminConsole.open(window, language))
   handle('account-logout', () => account.logout())
   handle('renew-ice', async () => {
     const active = current
@@ -350,7 +353,7 @@ function openWindow() {
   })
   window.webContents.on('render-process-gone', () => finish('窗口已关闭'))
   window.on('close', () => finish('窗口已关闭'))
-  window.on('closed', () => { window = null })
+  window.on('closed', () => { adminConsole?.close(); window = null })
   window.once('ready-to-show', () => window?.show())
   window.loadFile(page)
 }
@@ -389,10 +392,12 @@ if (primaryInstance) app.whenReady().then(async () => {
     directory: app.getPath('userData'), storage:safeStorage, base:managedUrl,
     fetchImpl: (url, init) => session.defaultSession.fetch(url, init),
     onChange: state => {
+      adminConsole?.checkIdentity()
       if (current && current.token !== account.approvedToken) finish(state.message || '账号授权已结束。')
       send({type:'account', account:state})
     }
   })
+  adminConsole = new AdminConsole({ BrowserWindow, session, account, origin: new URL(managedUrl).origin })
   preferences = new Settings(app.getPath('userData'), safeStorage)
   let startupError
   try { await preferences.load() } catch (err) { startupError = err.message }

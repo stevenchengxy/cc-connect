@@ -62,8 +62,8 @@ class DesktopAccount {
     return operation
   }
 
-  setState(status, username = '', message = '') {
-    this.state = { status, username, message, revision:(this.state.revision || 0) + 1 }
+  setState(status, username = '', message = '', role = 'member') {
+    this.state = { status, username, message, role, revision:(this.state.revision || 0) + 1 }
     this.onChange(this.state)
     return this.state
   }
@@ -109,7 +109,7 @@ class DesktopAccount {
     clearTimeout(this.timer)
     this.timer = setTimeout(() => { void this.logout().catch(() => {}) }, Math.min(2147483647, this.expiresAt - Date.now()))
     this.timer.unref?.()
-    return this.setState(data.account.status, data.account.username)
+    return this.setState(data.account.status, data.account.username, '', data.account.role === 'admin' ? 'admin' : 'member')
   }
 
   async forget() {

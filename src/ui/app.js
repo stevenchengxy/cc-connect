@@ -38,7 +38,33 @@ function describeError(error) {
   return translate(String(error?.message || error || '连接失败，请重试。')
     .replace(/^Error invoking remote method '[^']+': (?:Error: )?/, ''));
 }
+function renderIslandDetails() {
+  const platform = {darwin:'macOS', win32:'Windows', linux:'Linux'}[info.platform] || info.platform || '—';
+  $('island-device-label').textContent = t(peerName ? '远端设备' : '本机设备');
+  $('island-device').textContent = peerName || info.name || '—';
+  $('island-context-label').textContent = t(room ? '共享权限' : peerName ? '本机设备' : '操作系统');
+  $('island-context').textContent = room ? t(room.allowControl ? '允许键鼠控制' : '仅观看') : peerName ? info.name || '—' : platform;
+}
+function expandIsland(expand) {
+  $('island-toggle').setAttribute('aria-expanded', String(expand));
+  $('status-island').classList.toggle('expanded', expand);
+  $('island-details').inert = !expand;
+  $('island-details').setAttribute('aria-hidden', String(!expand));
+}
+$('island-toggle').onclick = () => expandIsland($('island-toggle').getAttribute('aria-expanded') !== 'true');
+for (const type of ['pointerdown', 'focusin']) document.addEventListener(type, event => {
+  if (!$('status-island').contains(event.target)) expandIsland(false);
+});
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && $('status-island').classList.contains('expanded')) {
+    event.preventDefault();
+    expandIsland(false);
+    $('island-toggle').focus();
+  }
+});
 function setStatus(text, state = '') {
+  renderIslandDetails();
+  $('top-status').dataset.i18n = text;
   $('top-status').textContent = translate(text);
   $('top-dot').className = 'state-dot' + (state ? ' ' + state : '');
 }
@@ -54,6 +80,8 @@ function renderAccount() {
   const login = account.status === 'signedOut';
   $('account-panel').hidden = approved;
   $('pairing-home').hidden = !approved;
+  $('admin-button').hidden = !(approved && account.role === 'admin');
+  $('settings-identity').textContent = account.username || t('未登录');
   $('account-logout').hidden = login;
   $('account-logout').title = [account.username, t('退出账号')].filter(Boolean).join(' · ');
   $('account-form').hidden = !login;
@@ -79,7 +107,8 @@ function setAccount(next) {
   if (account.status !== 'approved') {
     info.iceServers = [];
     $('invite-input').value = '';
-    if ($('settings-dialog').open) closeSettings();
+    $('advanced-settings').open = false;
+    $('turn-password').value = '';
     if (phase !== 'idle') backHome('账号授权已结束。', true);
   } else if (previous !== 'approved') {
     Promise.resolve(api.info()).then(updateInfo).catch(() => {});
@@ -120,8 +149,18 @@ $('account-refresh').onclick = () => void accountAction(() => api.refreshAccount
 $('account-logout').onclick = () => void accountAction(async () => {
   $('account-password').value = ''; $('register-invite').value = '';
   registering = false;
-  return api.logout();
+  const next = await api.logout();
+  if ($('settings-dialog').open) closeSettings();
+  return next;
 });
+
+$('admin-button').onclick = async () => {
+  if (account.status !== 'approved' || account.role !== 'admin') return;
+  $('admin-button').disabled = true;
+  try { await api.openAdminConsole(); }
+  catch (error) { notice(phase === 'session' ? 'session-notice' : 'home-notice', describeError(error), true); }
+  finally { $('admin-button').disabled = false; }
+};
 
 function syncHome() {
   const idle = phase === 'idle';
@@ -136,9 +175,10 @@ function syncHome() {
   $('invite-box').hidden = !inviting;
   $('cancel-host').hidden = !inviting;
   $('waiting').hidden = phase !== 'joining';
-  $('settings-button').disabled = !canPair;
+  $('settings-button').disabled = phase === 'request';
+  $('settings-end').hidden = phase !== 'session';
+  $('advanced-settings').hidden = !canPair;
   $('update-button').disabled = !idle;
-  $('language-select').disabled = !idle;
 }
 function updateInfo(data) {
   info = data;
@@ -150,6 +190,8 @@ function updateInfo(data) {
     refreshLanguage();
   }
   renderUpdate();
+  renderIslandDetails();
+  $('settings-version').textContent = info.version || '';
   document.documentElement.dataset.platform = info.platform;
   $('device-name').textContent = info.name || t('本机');
   const names = { darwin:'macOS', win32:'Windows', linux:'Linux' };
@@ -282,8 +324,11 @@ $('copy-button').onclick = async () => {
 };
 $('host-invite').onclick = (e) => e.target.select();
 
+$('settings-end').onclick = () => { closeSettings(); void disconnect(); };
 $('settings-button').onclick = () => {
-  if (phase !== 'idle') return;
+  if (phase === 'request') return;
+  expandIsland(false);
+  $('advanced-settings').open = false;
   $('turn-url').value = info.turnUrl || '';
   $('turn-user').value = info.turnUsername || '';
   $('turn-password').value = '';
@@ -297,7 +342,7 @@ $('cancel-settings').onclick = closeSettings;
 $('settings-dialog').onclose = () => { $('turn-password').value = ''; };
 $('settings-form').onsubmit = async (event) => {
   event.preventDefault();
-  if (phase !== 'idle') return;
+  if (phase !== 'idle' || account.status !== 'approved' || !$('advanced-settings').open) return;
   $('save-settings').disabled = true;
   try {
     await api.settings({
@@ -312,6 +357,8 @@ $('settings-form').onsubmit = async (event) => {
 
 async function requestConsent(event) {
   if (!['listening','opening'].includes(phase)) return;
+  expandIsland(false);
+  if ($('settings-dialog').open) closeSettings();
   phase = 'request'; syncHome();
   const token = generation;
   peerName = event.name || t('远端设备');
@@ -363,6 +410,7 @@ function showPermission(value) {
     ? (value.role === 'host' ? '允许键鼠控制' : '可控制 · Shift + Esc 释放键鼠')
     : '仅观看';
   $('permission-state').textContent = translate(modeText);
+  renderIslandDetails();
 }
 function sharePermission(value) {
   if (value.role === 'host') send(value.channel, {kind:'permission',allowControl:value.allowControl});
@@ -482,7 +530,10 @@ function connectionChanged(value) {
     clearTimeout(value.connectTimer); clearTimeout(value.lossTimer);
     value.lossTimer = null;
     setStatus(value.role === 'host' ? '正在共享' : '已连接','live');
-    if (value.role === 'host') $('sharing-title').textContent = t('你的屏幕正在共享');
+    if (value.role === 'host') {
+      $('sharing-title').dataset.i18n = '你的屏幕正在共享';
+      $('sharing-title').textContent = t('你的屏幕正在共享');
+    }
     void readStats(value);
   } else if (['closed','failed'].includes(state)) {
     terminate(value, mediaFailureMessage(value));
@@ -566,13 +617,14 @@ function startSession(event) {
   if ($('consent').open) $('consent').close();
   phase = 'session';
   $('home').hidden = true; $('session').hidden = false;
-  $('settings-button').disabled = true;
+  syncHome();
   notice('session-notice');
   const host = event.role === 'host';
   peerName = event.name || peerName || t('远端设备');
   $('session-title').textContent = host ? t('向「{name}」共享屏幕', {name:peerName}) : peerName;
   $('viewer-stage').hidden = host; $('host-stage').hidden = !host;
   $('fullscreen').hidden = host; $('live-quality-wrap').hidden = host;
+  $('sharing-title').dataset.i18n = '正在建立屏幕共享';
   $('sharing-title').textContent = t('正在建立屏幕共享');
   $('session-stats').textContent = t('正在协商加密连接…');
   setStatus('正在连接','pending');
@@ -635,6 +687,7 @@ async function capture(value) {
   } catch (e) {
     if (!isCurrent(value)) return;
     if (e.name === 'InvalidStateError' && !value.stream) {
+      $('sharing-title').dataset.i18n = '点击开始共享此屏幕';
       $('sharing-title').textContent = t('点击开始共享此屏幕');
       $('resume-capture').hidden = false;
     } else {
@@ -859,14 +912,17 @@ function refreshLanguage() {
   $('language-select').value = i18n.getLanguage();
   window.ccSelects?.refresh();
   renderUpdate();
-  setStatus('待连接');
+  renderIslandDetails();
+  if (room) {
+    showPermission(room);
+    $('session-title').textContent = room.role === 'host' ? t('向「{name}」共享屏幕', {name:peerName}) : peerName;
+  }
   setQuality(quality);
   $('device-name').textContent = info.name || t('本机');
   for (const id of ['home-notice', 'settings-notice']) notice(id);
   if (api?.setLanguage) Promise.resolve(api.setLanguage(i18n.getLanguage())).catch(() => {});
 }
 $('language-select').onchange = () => {
-  if (phase !== 'idle') return;
   i18n.setLanguage($('language-select').value);
   refreshLanguage();
 };

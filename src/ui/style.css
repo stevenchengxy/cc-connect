@@ -387,3 +387,51 @@ select.custom-select-native {
 #account-identity { margin-bottom: 16px; }
 #registration-help { margin-top: 8px; }
 .workspace:has(#account-panel:not([hidden])) .hero { height: clamp(115px,23vh,180px); }
+
+/* On the home screen the island floats over the hero. In a session it leaves room for the end control. */
+.header-actions { align-items: flex-start; gap: 8px; padding-block: 10px; }
+body:has(#home:not([hidden])) .header-actions { height: 56px; }
+.status-island {
+  width: max-content; max-width: min(320px,42vw); border-radius: 21px; color: #f6f9ff;
+  background: linear-gradient(145deg,#263449,#131d2c 75%);
+  box-shadow: inset 0 1px 1px #ffffff2e, 0 3px 9px #1e2e4624;
+  interpolate-size: allow-keywords; transition: width 320ms cubic-bezier(.22,.85,.22,1);
+}
+.status-island.expanded { width: min(248px,42vw); }
+#island-toggle,.admin-button { display: inline-flex; align-items: center; gap: 8px; height: 36px; border: 0; border-radius: 22px; white-space: nowrap; font-size: 13px; font-weight: 600; }
+#island-toggle { width: 100%; padding: 0 14px; color: inherit; background: transparent; }
+#island-toggle:focus-visible { outline: 2px solid #527cbb; outline-offset: 3px; }
+#top-dot { flex: none; background: #a4b4ce; }
+#top-dot.pending { background: #ffc778; animation: island-pulse 1.7s ease-in-out infinite; }
+#top-dot.live { background: #77e9b9; box-shadow: 0 0 0 3px #77e9b91c; }
+.island-chevron { width: 6px; height: 6px; margin: -3px 1px 0 auto; border-right: 1.5px solid #bdc9db; border-bottom: 1.5px solid #bdc9db; transform: rotate(45deg); transition: transform 220ms ease; }
+.expanded .island-chevron { transform: translateY(3px) rotate(225deg); }
+.island-details { display: grid; grid-template-rows: 0fr; opacity: 0; visibility: hidden; transition: grid-template-rows 280ms var(--ease-out), opacity 160ms ease, visibility 280ms; }
+.expanded .island-details { grid-template-rows: 1fr; opacity: 1; visibility: visible; }
+.status-island:not(.expanded) .island-details { inline-size: 0; }
+#settings-end { margin-top: 14px; }
+.island-details > div { min-height: 0; overflow: hidden; }
+.island-details dl { margin: 1px 15px 14px; padding-top: 10px; border-top: 1px solid #ffffff24; display: grid; grid-template-columns: auto minmax(0,1fr); gap: 6px 12px; font-size: 12px; }
+.island-details dt { color: #b5c1d4; }
+.island-details dd { margin: 0; overflow-wrap: anywhere; text-align: right; }
+.admin-button { padding: 0 13px; color: #343e78; background: #f2f3fe; box-shadow: inset 0 0 0 1px #aab4db, 0 1px 2px #283d6821; }
+.admin-button svg { width: 16px; height: 16px; }
+.admin-button:hover { background: #fff; }
+#settings-button { width: 36px; height: 36px; }
+.settings-list { border: 1px solid #d4ddec; border-radius: 17px; background: #ffffffad; }
+.settings-row { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 15px; min-height: 54px; font-size: 14px; font-weight: 550; }
+.settings-row + .settings-row { border-top: 1px solid #dce3ed; }
+button.settings-row { background: transparent; border: 0; }
+button.settings-row:hover:not(:disabled) { background: #eaf0fb; }
+.row-end { display: inline-flex; align-items: center; gap: 8px; font-weight: 450; color: var(--muted); }
+.row-end svg { height: 14px; width: 14px; }
+#settings-identity { display: block; font-weight: 450; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.text-action { flex: none; border: 0; border-radius: 8px; background: #eef2f9; color: #364d77; font-size: 12px; padding: 7px 10px; }
+#advanced-settings { margin-top: 14px; }
+#advanced-settings summary { cursor: pointer; color: #475873; font-size: 13px; font-weight: 550; padding: 8px 4px; }
+#advanced-settings form { padding: 2px 4px; }
+@keyframes island-pulse { 50% { box-shadow: 0 0 0 3px #ffc77828; } }
+@media (prefers-reduced-motion: reduce) {
+  .status-island,.island-details,.island-chevron { transition: none; }
+  #top-dot.pending { animation: none; }
+}

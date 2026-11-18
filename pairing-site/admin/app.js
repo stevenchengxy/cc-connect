@@ -8,22 +8,34 @@ const labels = {
   boundary:['达到预算的 90% 后停止签发凭据。流量统计存在延迟。同一 Cloudflare 账户的其他 Realtime 服务也占用免费额度。','達到預算的 90% 後停止簽發憑證。流量統計存在延遲。同一 Cloudflare 帳戶的其他 Realtime 服務也佔用免費額度。','New credentials stop at 90% of the budget. Metering is delayed. Other Realtime services on the same Cloudflare account also use the shared allowance.'],
   memberBudget:['账号和全局均有可用配额时才能使用中继。配额为零时仍可直连。','帳號和全域均有可用配額時才能使用中繼。配額為零時仍可直連。','Relay needs available account and global quotas. A zero relay quota still allows direct connections.'],
   failed:['操作失败，请刷新后重试。','操作失敗，請重新整理後再試。','Could not complete the action. Refresh and retry.'], unavailableAction:['服务或流量计量暂不可用，请检查服务端配置。','服務或流量計量暫不可用，請檢查伺服器設定。','Service or metering unavailable. Check the server configuration.'], denied:['请使用已批准的管理员账号。','請使用已核准的管理員帳號。','Use an approved administrator account.'], credentials:['账号或密码有误。','帳號或密碼有誤。','Check your username and password.'], expired:['登录已失效，请重新登录。','登入已失效，請重新登入。','Your session expired. Sign in again.'], busy:['请求过于频繁，请稍后再试。','請求過於頻繁，請稍後再試。','Too many requests. Try again later.'], invalid:['请检查数值和预算余量。','請檢查數值和預算餘額。','Check the values and remaining budget.'], done:['已保存。','已儲存。','Saved.'],
-  irreversible:['永久撤销后，账号将无法重新启用。','永久撤銷後，帳號將無法重新啟用。','Revocation is permanent. This account cannot be reactivated.'], confirm:['确认撤销','確認撤銷','Confirm revocation'], cancel:['取消','取消','Cancel'], net:['正在读取…','讀取中…','Loading…'], enter:['重新登录','重新登入','Sign in again'], close:['关闭','關閉','Close']
+  irreversible:['永久撤销后，账号将无法重新启用。','永久撤銷後，帳號將無法重新啟用。','Revocation is permanent. This account cannot be reactivated.'], confirm:['确认撤销','確認撤銷','Confirm revocation'], cancel:['取消','取消','Cancel'], net:['正在读取…','讀取中…','Loading…'], retry:['重试','重試','Retry'], verifying:['正在验证管理员账号…','正在驗證管理員帳號…','Verifying administrator access…'], enter:['重新登录','重新登入','Sign in again'], close:['关闭','關閉','Close']
 };
 const $=id=>document.getElementById(id);
-let locale=localStorage.getItem('cc.admin.language') || (navigator.language.toLowerCase().startsWith('zh') ? (/tw|hk|hant/i.test(navigator.language)?'zh-TW':'zh-CN'):'en');
+const desktopLocale=/^#desktop=(zh-CN|zh-TW|en)$/.exec(location.hash)?.[1];
+let desktopAuthenticated=false;
+let locale=desktopLocale || localStorage.getItem('cc.admin.language') || (navigator.language.toLowerCase().startsWith('zh') ? (/tw|hk|hant/i.test(navigator.language)?'zh-TW':'zh-CN'):'en');
 if (!['zh-CN','zh-TW','en'].includes(locale)) locale='zh-CN';
 const t=k=>labels[k]?.[['zh-CN','zh-TW','en'].indexOf(locale)] || k;
 let token='', accounts=[], cursor=null, globalInfo=null, generation=0, detailVersion=0, busy=false;
 function element(tag,txt,cls) {const e=document.createElement(tag);if(txt!==undefined)e.textContent=txt;if(cls)e.className=cls;return e;}
 function localize(){document.documentElement.lang=locale;$('lang').value=locale;document.querySelectorAll('[data-t]').forEach(n=>n.textContent=t(n.dataset.t));document.querySelector('.close').setAttribute('aria-label',t('close'));render();}
 function notice(key,inDialog=false){$(inDialog?'dialog-msg':'notice').textContent=key ? t(key):'';}
-function clear(){generation++; token='';accounts=[];cursor=null;globalInfo=null;$('details').close();$('workspace').hidden=true;$('logout').hidden=true;$('signin').hidden=false;render();}
+function showWorkspace(){
+  $('signin').hidden=true;
+  $('retry-desktop').hidden=true;
+  $('workspace').hidden=false;
+  $('logout').hidden=desktopAuthenticated;
+}
+function clear(){
+  generation++;token='';desktopAuthenticated=false;accounts=[];cursor=null;globalInfo=null;
+  $('details').close();$('workspace').hidden=true;$('logout').hidden=true;
+  $('signin').hidden=Boolean(desktopLocale);$('retry-desktop').hidden=!desktopLocale;render();
+}
 async function api(url,method='GET',data) {
   const headers={}; if(token)headers.Authorization='Bearer '+token;
   if(data!==undefined)headers['Content-Type']='application/json';
   const r=await fetch('/v1/'+url,{method,headers,body:data===undefined?undefined:JSON.stringify(data),credentials:'omit',cache:'no-store',redirect:'error',signal:AbortSignal.timeout(20000)});
-  if(!r.ok){const signedIn=Boolean(headers.Authorization);if(r.status===401 && signedIn && headers.Authorization==='Bearer '+token){clear();notice('expired');}
+  if(!r.ok){const signedIn=desktopAuthenticated || Boolean(headers.Authorization);if(r.status===401 && signedIn && (desktopAuthenticated || headers.Authorization==='Bearer '+token)){clear();notice('expired');}
     throw new Error(({400:'invalid',401:signedIn?'expired':'credentials',403:'denied',409:'invalid',429:'busy',503:'unavailableAction'})[r.status]||'failed');}
   return r.status===204 ? null:r.json();
 }
@@ -58,12 +70,12 @@ function render(){
   if(!rows.childElementCount)rows.append(element('p',t('noAccounts'),'fine'));$('more').hidden=!cursor;
 }
 async function refresh(append=false){
-  if(!token)return;const id=++generation;
+  if(!desktopAuthenticated && !token)return;const id=++generation;
   const params=new URLSearchParams();if(append&&cursor)params.set('cursor',cursor);if($('filter').value!=='all')params.set('status',$('filter').value);
   const page=await api('admin/accounts'+(params.size?'?'+params:''));
-  if(id!==generation || !token)return;
+  if(id!==generation)return;
   accounts=append?[...accounts,...page.accounts]:page.accounts;cursor=page.nextCursor;render();
-  if(!append){const usage=await api('admin/usage');if(id===generation && token){globalInfo=usage;render();}}
+  if(!append){const usage=await api('admin/usage');if(id===generation){globalInfo=usage;render();}}
 }
 function dialog(title){detailVersion++;$('dialog-title').textContent=title;$('dialog-body').replaceChildren();notice('',true);if(!$('details').open)$('details').showModal();return $('dialog-body');}
 function titled(label,control){const f=element('label',undefined,'field');f.append(element('span',t(label)),control);return f;}
@@ -96,7 +108,7 @@ async function showAccount(a){
 $('login-form').onsubmit=e=>{e.preventDefault();if(busy)return;busy=true;const form=e.currentTarget,pw=form.elements.password;const data={username:form.elements.username.value.trim(),password:pw.value};pw.value='';
   void action(form.querySelector('button'),async()=>{const auth=await api('auth/login','POST',data);token=auth.token;
     if(auth.account?.role!=='admin'||auth.account?.status!=='approved'){try{await api('auth/logout','POST');}finally{clear();}throw new Error('denied');}
-    $('signin').hidden=true;$('workspace').hidden=false;$('logout').hidden=false;await refresh();
+    showWorkspace();await refresh();
   }).finally(()=>{busy=false;});};
 $('logout').onclick=()=>action($('logout'),async()=>{try{await api('auth/logout','POST');}finally{clear();}});
 $('refresh').onclick=()=>action($('refresh'),()=>refresh());$('more').onclick=()=>action($('more'),()=>refresh(true));$('filter').onchange=()=>{cursor=null;accounts=[];render();void refresh().catch(e=>notice(labels[e.message]?e.message:'failed'));};
@@ -105,3 +117,18 @@ $('invite').onclick=()=>action($('invite'),async()=>{const r=await api('admin/in
 $('details').addEventListener('close',()=>{detailVersion++;$('dialog-body').replaceChildren();notice('',true);});
 $('lang').onchange=()=>{locale=$('lang').value;localStorage.setItem('cc.admin.language',locale);$('details').close();localize();};
 localize();
+async function verifyDesktopSession(){
+  $('signin').hidden=true;$('retry-desktop').hidden=true;notice('verifying');
+  try{
+    const identity=await api('auth/me');
+    if(identity.account?.role!=='admin'||identity.account?.status!=='approved') throw new Error('denied');
+    desktopAuthenticated=true;notice('');showWorkspace();await refresh();
+  }catch(e){
+    notice(e.message==='credentials'?'expired':labels[e.message]?e.message:'failed');
+    $('retry-desktop').hidden=desktopAuthenticated;
+  }
+}
+if(desktopLocale){
+  $('retry-desktop').onclick=()=>verifyDesktopSession();
+  void verifyDesktopSession();
+}

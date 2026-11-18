@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('jianping', {
   register: call('account-register'),
   refreshAccount: call('account-refresh'),
   logout: call('account-logout'),
+  openAdminConsole: call('open-admin-console'),
   renewIce: call('renew-ice'),
   setLanguage: call('language'),
   checkUpdate: call('check-update'),

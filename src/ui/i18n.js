@@ -3,6 +3,13 @@
 // Source phrases remain stable keys so native errors can use the same catalog.
 window.ccI18n = (() => {
   const messages = {
+    '用户管理': ['使用者管理', 'Manage users'],
+    '当前账号': ['目前帳號', 'Account'],
+    '未登录': ['未登入', 'Signed out'],
+    '自定义中继': ['自訂中繼', 'Custom relay'],
+    '操作系统': ['作業系統', 'Operating system'],
+    '共享权限': ['共享權限', 'Sharing access'],
+    '设置': ['設定', 'Settings'],
     '登录账号': ['登入帳號', 'Sign in'],
     '注册账号': ['註冊帳號', 'Create an account'],
     '用户名': ['使用者名稱', 'Username'],
