@@ -14,8 +14,9 @@ const {extractFile, uncache} = require('@electron/asar')
 const appPath = '/Applications/CC Connect.app'
 const executable = path.join(appPath,'Contents/MacOS/CC Connect')
 const asarPath = path.join(appPath,'Contents/Resources/app.asar')
-const targetSHA = 'ecb6918e2610eaa424bbeac5d84cb06fc009bc88951fcee853407ce99e94b34b'
-const targetName = 'CC-Connect-0.4.0-universal.dmg'
+const {verifyManifest} = require('../src/updater.cjs')
+const targetVersion = require('../package.json').version
+const manifestURL = 'https://cc-connect-desktop.stevenchengxy19.chatgpt.site/updates/latest.json'
 const updates = path.join(os.homedir(),'Library/Application Support/CC Connect/updates')
 const profile = path.dirname(updates)
 const netLog = path.join(process.env.RUNNER_TEMP || os.tmpdir(),'cc-connect-update-netlog.json')
@@ -61,16 +62,16 @@ async function waitPhase(page,expected,ms) {
   throw Error('Timed out reaching updater state '+expected)
 }
 
-async function checkDownload() {
+async function checkDownload(target) {
   for (const name of await fs.readdir(updates)) {
     if (!name.startsWith('download-')) continue
-    const file = path.join(updates,name,targetName)
+    const file = path.join(updates,name,target.name)
     if (!await exists(file)) continue
     const hash = createHash('sha256')
     for await (const chunk of createReadStream(file)) hash.update(chunk)
-    assert.equal(hash.digest('hex'),targetSHA)
-    assert.equal((await fs.stat(file)).size,227203197)
-    console.log('Downloaded version 0.4.0 DMG matched 227203197 bytes and SHA-256',targetSHA)
+    assert.equal(hash.digest('hex'),target.sha256)
+    assert.equal((await fs.stat(file)).size,target.size)
+    console.log('Downloaded DMG matched the signed size and SHA-256',target.size,target.sha256)
     return
   }
   throw Error('The packaged updater did not stage the expected DMG')
@@ -83,6 +84,11 @@ async function run() {
   assert.equal(version(),'0.3.3')
   assert(await exists(executable))
   assert(!await exists(profile),'Expected a fresh disposable runner profile')
+  const response = await fetch(manifestURL,{signal:AbortSignal.timeout(30000)})
+  assert(response.ok, 'Could not retrieve public update manifest')
+  const key = await fs.readFile(path.join(__dirname,'../src/update-public-key.pem'),'utf8')
+  const manifest = verifyManifest(await response.json(),key)
+  assert.equal(manifest.version,targetVersion)
   const old = start()
   launched = old.process
   const ws = await observe(()=>{
@@ -94,20 +100,22 @@ async function run() {
   const appInfo=await page.evaluate(()=>window.jianping.info())
   assert.equal(appInfo.version,'0.3.3')
   console.log('Installed 0.3.3 app opened on fresh',process.arch,'GitHub Mac')
-  await page.locator('#update-button').click()
+  const updateButton = page.locator('#update-button')
+  if (!await updateButton.isVisible()) await page.locator('#settings-button').click()
+  await updateButton.click()
   await waitPhase(page,'available',60000)
-  assert.equal((await page.evaluate(()=>window.jianping.info())).update.version,'0.4.0')
-  console.log('Packaged updater accepted the public signed manifest for 0.4.0')
+  assert.equal((await page.evaluate(()=>window.jianping.info())).update.version,targetVersion)
+  console.log('Packaged updater accepted the public signed manifest for',targetVersion)
   await page.locator('#update-action').click()
   await waitPhase(page,'ready',240000)
-  await checkDownload()
+  await checkDownload(manifest.files.mac)
   await page.locator('#update-action').click()
   await observe(()=>old.process.exitCode!==null,70000)
   assert.equal(old.process.exitCode,0)
-  await observe(async()=>await exists(asarPath) && version()==='0.4.0',60000)
+  await observe(async()=>await exists(asarPath) && version()===targetVersion,60000)
   const bundleId=execFileSync('/usr/libexec/PlistBuddy',['-c','Print :CFBundleIdentifier',appPath+'/Contents/Info.plist'],{encoding:'utf8'}).trim()
   assert.equal(bundleId,'app.jianping.desktop')
-  assert.equal(execFileSync('/usr/libexec/PlistBuddy',['-c','Print :CFBundleShortVersionString',appPath+'/Contents/Info.plist'],{encoding:'utf8'}).trim(),'0.4.0')
+  assert.equal(execFileSync('/usr/libexec/PlistBuddy',['-c','Print :CFBundleShortVersionString',appPath+'/Contents/Info.plist'],{encoding:'utf8'}).trim(),targetVersion)
   execFileSync('/usr/bin/codesign',['--verify','--deep','--strict',appPath])
   assert(!await exists(path.join(os.homedir(),'Applications/CC Connect.app')))
   const swift = `import AppKit
@@ -116,7 +124,7 @@ let stop=Date().addingTimeInterval(25)
 while Date() < stop {
   let apps=NSRunningApplication.runningApplications(withBundleIdentifier:"app.jianping.desktop").filter{!$0.isTerminated}
   if apps.count == 1, apps[0].bundleURL?.path == target, apps[0].isFinishedLaunching, apps[0].processIdentifier != ${old.process.pid} {
-    print("Relaunched 0.4.0 at the original path with one live instance");exit(0)
+    print("Relaunched ${targetVersion} at the original path with one live instance");exit(0)
   }
   RunLoop.current.run(until:Date().addingTimeInterval(0.4))
 }
@@ -128,7 +136,10 @@ exit(1)`
     try { const u=new URL(event.params.url);urls.add(u.hostname+u.pathname) } catch {}
   }
   assert(urls.has('cc-connect-desktop.stevenchengxy19.chatgpt.site/updates/latest.json'))
-  assert(urls.has('github.com/stevenchengxy/cc-connect/releases/download/v0.4.0/'+targetName))
+  for (const part of manifest.files.mac.parts) {
+    const asset = new URL(part.url)
+    assert(urls.has(asset.hostname+asset.pathname))
+  }
   assert([...urls].some(s=>s.startsWith('release-assets.githubusercontent.com/') || s.startsWith('objects.githubusercontent.com/')))
   console.log('Chromium network log confirmed production manifest, public GitHub release, and release-asset transfer')
 }
