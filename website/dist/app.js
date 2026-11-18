@@ -1,7 +1,7 @@
 'use strict';
 const messages = {
   'zh-CN': {
-    release: '0.4.1 预览版', category: '远程桌面', downloads: '下载',
+    release: '0.4.2 预览版', category: '远程桌面', downloads: '下载',
     macRequirements: 'macOS 13+ · Apple Silicon / Intel', winRequirements: 'Windows 10+ · x64',
     sourceCode: 'GitHub 开源', winFormat: '安装程序 · x64', updates: '可在应用内检查更新。Windows 安装程序会更新现有安装。',
     downloadMac: '下载 macOS', downloadWin: '下载 Windows', connectTitle: '如何连接',
@@ -15,7 +15,7 @@ const messages = {
     privacy: '每次共享需要本机确认。具备本机屏幕、进程或网络观察权限的工具仍可能识别远控。'
   },
   'zh-TW': {
-    release: '0.4.1 預覽版', category: '遠端桌面', downloads: '下載',
+    release: '0.4.2 預覽版', category: '遠端桌面', downloads: '下載',
     macRequirements: 'macOS 13+ · Apple Silicon / Intel', winRequirements: 'Windows 10+ · x64',
     sourceCode: 'GitHub 開源', winFormat: '安裝程式 · x64', updates: '可在應用程式內檢查更新。Windows 安裝程式會更新現有安裝。',
     downloadMac: '下載 macOS', downloadWin: '下載 Windows', connectTitle: '如何連線',
@@ -29,7 +29,7 @@ const messages = {
     privacy: '每次分享都需要本機確認。具備本機螢幕、程序或網路觀察權限的工具仍可能辨識遠端控制。'
   },
   en: {
-    release: '0.4.1 Preview', category: 'Remote desktop', downloads: 'Downloads',
+    release: '0.4.2 Preview', category: 'Remote desktop', downloads: 'Downloads',
     macRequirements: 'macOS 13+ · Apple Silicon / Intel', winRequirements: 'Windows 10+ · x64',
     sourceCode: 'Open source on GitHub', winFormat: 'Installer · x64', updates: 'Check for updates in the app. The Windows installer updates your existing installation.',
     downloadMac: 'Get for Mac', downloadWin: 'Get for Windows', connectTitle: 'Connect your computers',

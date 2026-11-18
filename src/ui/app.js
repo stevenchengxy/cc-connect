@@ -38,10 +38,24 @@ function describeError(error) {
   return translate(String(error?.message || error || '连接失败，请重试。')
     .replace(/^Error invoking remote method '[^']+': (?:Error: )?/, ''));
 }
+// Resize only when the label, locale or session controls change, never on animation frames.
+const islandSizes = new ResizeObserver(entries => {
+  for (const entry of entries) {
+    const width = entry.borderBoxSize[0].inlineSize;
+    if (entry.target === $('island-toggle')) {
+      $('status-island').style.setProperty('--island-trigger-width', width + 'px');
+    } else if (width > 0) {
+      document.documentElement.style.setProperty('--session-actions-width', width + 'px');
+    }
+  }
+});
+islandSizes.observe($('island-toggle'));
+islandSizes.observe(document.querySelector('.session-actions'));
 function renderIslandDetails() {
   const platform = {darwin:'macOS', win32:'Windows', linux:'Linux'}[info.platform] || info.platform || '—';
   $('island-device-label').textContent = t(peerName ? '远端设备' : '本机设备');
   $('island-device').textContent = peerName || info.name || '—';
+  $('island-device').title = $('island-device').textContent;
   $('island-context-label').textContent = t(room ? '共享权限' : peerName ? '本机设备' : '操作系统');
   $('island-context').textContent = room ? t(room.allowControl ? '允许键鼠控制' : '仅观看') : peerName ? info.name || '—' : platform;
 }

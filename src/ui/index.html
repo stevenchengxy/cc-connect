@@ -32,12 +32,16 @@
   <header class="topbar">
     <div class="wordmark"><img class="brand-mark" src="../icon.png" alt="" width="36" height="36">CC Connect</div>
     <div class="header-actions">
-      <button type="button" id="admin-button" class="admin-button" hidden><svg aria-hidden="true"><use href="#i-users"/></svg><span data-i18n="用户管理">用户管理</span></button>
       <div id="status-island" class="status-island">
+        <div class="island-shadow"><div class="island-surface">
+          <div id="island-details" class="island-details" inert aria-hidden="true"><dl><dt id="island-device-label"></dt><dd id="island-device"></dd><dt id="island-context-label"></dt><dd id="island-context"></dd></dl></div>
+        </div></div>
         <button type="button" id="island-toggle" aria-expanded="false" aria-controls="island-details"><i class="state-dot" id="top-dot" aria-hidden="true"></i><span id="top-status" aria-live="polite">待连接</span><i class="island-chevron" aria-hidden="true"></i></button>
-        <div id="island-details" class="island-details" inert aria-hidden="true"><div><dl><dt id="island-device-label"></dt><dd id="island-device"></dd><dt id="island-context-label"></dt><dd id="island-context"></dd></dl></div></div>
       </div>
-      <button type="button" id="settings-button" class="icon-button" title="设置" data-i18n-title="设置" aria-label="设置" data-i18n-aria-label="设置"><svg aria-hidden="true"><use href="#i-gear"/></svg></button>
+      <div class="header-utilities">
+        <button type="button" id="admin-button" class="admin-button" hidden><svg aria-hidden="true"><use href="#i-users"/></svg><span data-i18n="用户管理">用户管理</span></button>
+        <button type="button" id="settings-button" class="icon-button" title="设置" data-i18n-title="设置" aria-label="设置" data-i18n-aria-label="设置"><svg aria-hidden="true"><use href="#i-gear"/></svg></button>
+      </div>
     </div>
   </header>
 
