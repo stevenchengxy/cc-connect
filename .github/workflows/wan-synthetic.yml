@@ -14,7 +14,10 @@ jobs:
           persist-credentials: false
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Install the release's Electron runtime
-        run: node node_modules/electron/install.js
+        run: |
+          node node_modules/electron/install.js
+          sudo chown root:root node_modules/electron/dist/chrome-sandbox
+          sudo chmod 4755 node_modules/electron/dist/chrome-sandbox
       - name: Verify the view-only session
         env:
           CC_WAN_QA_INVITE: ${{ secrets.CC_CONNECT_SYNTHETIC_WAN_031 }}
