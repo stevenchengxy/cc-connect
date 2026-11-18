@@ -97,6 +97,7 @@ async function main() {
           assert.equal(event.managedWan, true)
           console.log('Managed pairing completed for', role, mode)
           const iceServers = await peer.getManagedIceServers()
+          console.log('Managed TURN entries for', role, mode, iceServers.length)
           await notify({type:'accepted', role, name:event.name, managedWan:true, managedIceServers:iceServers, allowControl:host && consentedControl})
         } else if (event.type === 'signal') await notify({type:'signal', signal:event.payload})
         else await notify(event)
@@ -137,10 +138,21 @@ async function main() {
     }
     await page.addInitScript(({host, requireRelay}) => {
       const NativePeer = window.RTCPeerConnection
+      window.qaCandidates = {local:new Set(), remote:new Set()}
       window.RTCPeerConnection = class extends NativePeer {
         constructor(config) {
           super(requireRelay ? {...config, iceTransportPolicy:'relay'} : config)
           window.qaPeer = this
+          this.addEventListener('icecandidate', event => {
+            if (event.candidate?.type) window.qaCandidates.local.add(event.candidate.type)
+          })
+        }
+        async addIceCandidate(candidate) {
+          await super.addIceCandidate(candidate)
+          if (candidate?.candidate) {
+            const {type} = new RTCIceCandidate(candidate)
+            if (type) window.qaCandidates.remote.add(type)
+          }
         }
       }
       window.jianping = {
@@ -243,7 +255,10 @@ async function main() {
       const pc = window.qaPeer
       if (!pc) return {establishedPairing:false}
       const stats = [...(await pc.getStats()).values()]
-      const types = role => [...new Set(stats.filter(s => s.type === role + '-candidate').map(s => s.candidateType))]
+      const types = role => [...new Set([
+        ...window.qaCandidates[role],
+        ...stats.filter(s => s.type === role + '-candidate').map(s => s.candidateType)
+      ])]
       return {establishedPairing:true, ice:pc.iceConnectionState, local:types('local'), remote:types('remote')}
     }).catch(() => null)
     if (diagnostics) console.log('Synthetic ICE state', diagnostics)
