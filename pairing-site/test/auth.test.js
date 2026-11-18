@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import worker from '../worker/index.js';
+import {periodAt} from '../worker/usage-provider.js';
 import { approvedSession, database, fixture, sha, token } from './fixture.js';
 
 function api(env) {
@@ -88,4 +89,21 @@ test('throttles invalid login attempts consistently across distributed sources f
   for (let i=0;i<12;i++) assert.equal((await call('POST','auth/login',{username:'test.user',password:'invalid-password'},undefined,{'CF-Connecting-IP':'192.0.2.'+(i+1)})).status,401);
   const blocked=await call('POST','auth/login',{username:'TEST.USER',password:'invalid-password'},undefined,{'CF-Connecting-IP':'192.0.2.250'});
   assert.equal(blocked.status,429); assert.deepEqual(await blocked.json(),{error:'rate_limited'});
+});
+
+test('account list filters server-side and reports only current-period cached usage', async t => {
+  const {env,call,result} = await setup(t);
+  const member = approvedSession(env);
+  env.CC_TURN_BILLING_DAY = '18';
+  const now = Date.now(), {periodStart} = periodAt(now,'18');
+  const insert = env.handle.prepare('INSERT INTO relay_meters VALUES(?,?,?,?,1)');
+  insert.run(member.id,'2000-01-18T00:00:00.000Z',1,72000);
+  insert.run(member.id,periodStart,now,7580);
+  const page = await (await call('GET','admin/accounts?status=approved',undefined,result.token)).json();
+  const measured = page.accounts.find(account => account.id===member.id);
+  assert.equal(measured.relayUsedBytes,7580);
+  assert.equal(measured.relayCheckedAt,now);
+  assert.equal(page.accounts.find(account=>account.id===result.account.id).relayUsedBytes,null);
+  const pending = await (await call('GET','admin/accounts?status=pending',undefined,result.token)).json();
+  assert.deepEqual(pending.accounts,[]);
 });

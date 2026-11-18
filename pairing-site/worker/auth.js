@@ -1,4 +1,5 @@
 // All authorization decisions use the primary D1 binding; clients keep only the raw session token.
+import { periodAt } from './usage-provider.js';
 import { closeSessionRelay, revokeAccountRelay, usageAdmin } from './usage.js';
 
 const TOKEN = /^[A-Za-z0-9_-]{43}$/;
@@ -176,11 +177,21 @@ async function invite(env,now) {
   return result.meta.changes ? json(201,{invite:raw,expiresAt:seconds(expires)}) : authError(429,'invite_limit');
 }
 
-async function listAccounts(url,db) {
+async function listAccounts(url,env,now) {
   const cursor = url.searchParams.get('cursor') || '';
-  if (cursor && !UUID.test(cursor)) return authError(400,'invalid_request');
-  const {results} = await db.prepare('SELECT id,username,role,status,created FROM accounts WHERE id>? ORDER BY id LIMIT 51').bind(cursor).all();
-  const accounts = results.slice(0,50).map(profile);
+  const status = url.searchParams.get('status') || '';
+  if ((cursor && !UUID.test(cursor)) || (status && !['pending','approved','suspended','revoked'].includes(status))) {
+    return authError(400,'invalid_request');
+  }
+  const { periodStart } = periodAt(now,env.CC_TURN_BILLING_DAY);
+  const {results} = await env.DB.prepare(`SELECT a.id,a.username,a.role,a.status,a.created,
+    q.limit_bytes AS budget,m.high_egress AS used,m.checked
+    FROM accounts a LEFT JOIN relay_quotas q ON q.scope=a.id
+    LEFT JOIN relay_meters m ON m.scope=a.id AND m.period_start=?
+    WHERE a.id>? AND (?='' OR a.status=?) ORDER BY a.id LIMIT 51`).bind(periodStart,cursor,status,status).all();
+  const accounts = results.slice(0,50).map(row=>({
+    ...profile(row),relayBudgetBytes:row.budget ?? 0,relayUsedBytes:row.used ?? null,relayCheckedAt:row.checked ?? null
+  }));
   return json(200,{accounts,nextCursor:results.length>50 ? accounts[49].id : null});
 }
 
@@ -225,7 +236,7 @@ export async function accountRoutes(request,env) {
   if (denied) return denied;
   if (!path.startsWith('/v1/admin/')) return authError(404,'not_found');
   if (actor.role !== 'admin') return authError(403,'admin_required');
-  if (path === '/v1/admin/accounts' && request.method === 'GET') return listAccounts(url,env.DB);
+  if (path === '/v1/admin/accounts' && request.method === 'GET') return listAccounts(url,env,now);
   if (path === '/v1/admin/invites' && request.method === 'POST') return invite(env,now);
   const target = /^\/v1\/admin\/accounts\/([^/]+)(\/revoke-sessions)?$/.exec(path);
   if (target && UUID.test(target[1])) {
