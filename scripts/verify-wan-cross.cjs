@@ -95,6 +95,7 @@ async function main() {
       dispatching = dispatching.then(async () => {
         if (event.type === 'connected') {
           assert.equal(event.managedWan, true)
+          console.log('Managed pairing completed for', role, mode)
           const iceServers = await peer.getManagedIceServers()
           await notify({type:'accepted', role, name:event.name, managedWan:true, managedIceServers:iceServers, allowControl:host && consentedControl})
         } else if (event.type === 'signal') await notify({type:'signal', signal:event.payload})
@@ -128,6 +129,7 @@ async function main() {
         assert.equal(screen, 'synthetic')
         consentedControl = control
         peer.respond(true)
+        console.log('Synthetic host approved', mode, 'session')
       })
     } else {
       const invite = rawInvite.startsWith('RD1.') ? rawInvite : JSON.parse(rawInvite)[mode]
