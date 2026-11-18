@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="description" content="CC Connect — 简洁的跨平台远程桌面。下载 macOS 与 Windows 版本。">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'">
+  <title>CC Connect</title>
+  <link rel="icon" type="image/png" href="/assets/icon.png">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#main" aria-label="CC Connect"><img src="/assets/icon.png" width="38" height="38" alt=""></a>
+    <div class="language-switch" role="group" aria-label="语言 / Language">
+      <button type="button" data-language="zh-CN" aria-label="简体中文" aria-pressed="true">简</button>
+      <button type="button" data-language="zh-TW" aria-label="繁體中文" aria-pressed="false">繁</button>
+      <button type="button" data-language="en" aria-label="English" aria-pressed="false">EN</button>
+    </div>
+  </header>
+  <main id="main">
+    <section class="hero" aria-labelledby="title">
+      <img class="hero-art" src="/assets/glass-displays.webp" width="2061" height="763" alt="" fetchpriority="high">
+      <div class="hero-copy">
+        <p class="release"><span class="release-dot" aria-hidden="true"></span><span data-i18n="release">0.3.0 预览版</span></p>
+        <h1 id="title">CC Connect</h1>
+      </div>
+    </section>
+    <section class="downloads" aria-label="下载" data-label="downloads">
+      <article class="download-card">
+        <div class="platform-heading"><div><h2>macOS</h2><p class="requirements" data-i18n="macRequirements">macOS 13+ · Apple Silicon / Intel</p></div></div>
+        <a class="download primary" href="https://github.com/stevenchengxy/cc-connect/releases/download/v0.3.0/CC-Connect-0.3.0-universal.dmg" download="CC-Connect-0.3.0-universal.dmg"><span data-i18n="downloadMac">下载 macOS</span><span class="download-arrow" aria-hidden="true">↓</span></a>
+        <span class="file-kind">DMG · Universal</span>
+      </article>
+      <article class="download-card">
+        <div class="platform-heading"><div><h2>Windows</h2><p class="requirements" data-i18n="winRequirements">Windows 10+ · x64</p></div></div>
+        <a class="download secondary" href="https://github.com/stevenchengxy/cc-connect/releases/download/v0.3.0/CC-Connect-0.3.0-x64.exe" download="CC-Connect-0.3.0-x64.exe"><span data-i18n="downloadWin">下载 Windows</span><span class="download-arrow" aria-hidden="true">↓</span></a>
+        <span class="file-kind" data-i18n="winFormat">安装程序 · x64</span>
+      </article>
+    </section>
+    <div class="details-list">
+      <details><summary data-i18n="connectTitle">如何连接</summary><div class="detail-content"><ol><li data-i18n="step1">两台电脑分别打开 CC Connect。</li><li data-i18n="step2">被控端选择「共享此机」，将配对码发给另一端。</li><li data-i18n="step3">另一端粘贴配对码，被控端确认后开始连接。</li></ol><p data-i18n="permission">远程操作需要被控端勾选键鼠权限。</p></div></details>
+      <details><summary data-i18n="networkTitle">连接设置</summary><div class="detail-content"><p data-i18n="networkLan">同一局域网或可互访的 VPN 内，设置留空即可。</p><p data-i18n="networkWan">跨公网时，两端填写同一个 WSS 配对服务地址。无法直连时，再填写 TURN 中继地址、用户名和密码。这些值由你部署的服务或服务提供方给出。</p><p data-i18n="networkStatus">此版本需配置自己的公网服务。</p></div></details>
+      <details><summary data-i18n="releaseTitle">版本说明</summary><div class="detail-content"><p data-i18n="releaseInfo">支持简体中文、繁体中文与英文。macOS 包为本地签名，尚未公证。Windows 包尚未签名。</p><p data-i18n="updates">可在应用内检查更新。Windows 安装程序会更新现有安装。</p><p data-i18n="verification">本机双端配对、测试画面传输与断开已验证。Windows 实机键鼠操作和真实跨公网性能仍待验证。</p><p data-i18n="privacy">每次共享需要本机确认。具备本机屏幕、进程或网络观察权限的工具仍可能识别远控。</p></div></details>
+    </div>
+  </main>
+  <footer><span>CC Connect · 0.3.0</span><a href="https://github.com/stevenchengxy/cc-connect" target="_blank" rel="noopener noreferrer" data-i18n="sourceCode">GitHub 开源</a></footer>
+</body>
+</html>

@@ -1,0 +1,47 @@
+name: jianping
+services:
+  signal:
+    build: .
+    restart: unless-stopped
+    environment:
+      RELAY_BIND: 0.0.0.0
+    read_only: true
+    cap_drop: [ALL]
+
+  https:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on: [signal]
+    environment:
+      PAIR_DOMAIN: ${PAIR_DOMAIN:?Set PAIR_DOMAIN in .env}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+  turn:
+    image: coturn/coturn:4-alpine
+    restart: unless-stopped
+    network_mode: host
+    entrypoint: [/bin/sh, /opt/jianping/start-turn.sh]
+    environment:
+      PAIR_DOMAIN: ${PAIR_DOMAIN:?Set PAIR_DOMAIN in .env}
+      TURN_PUBLIC_IP: ${TURN_PUBLIC_IP:?Set TURN_PUBLIC_IP in .env}
+      TURN_LOCAL_IP: ${TURN_LOCAL_IP:?Set TURN_LOCAL_IP in .env}
+      TURN_USERNAME: ${TURN_USERNAME:?Set TURN_USERNAME in .env}
+    volumes:
+      - ./start-turn.sh:/opt/jianping/start-turn.sh:ro
+    secrets: [turn_password]
+    tmpfs:
+      - /tmp:mode=1777
+
+volumes:
+  caddy_data:
+  caddy_config:
+
+secrets:
+  turn_password:
+    environment: TURN_PASSWORD

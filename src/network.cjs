@@ -1,0 +1,385 @@
+'use strict';
+
+const { EventEmitter } = require('node:events');
+const crypto = require('node:crypto');
+const { promisify } = require('node:util');
+const https = require('node:https');
+const os = require('node:os');
+const { isIP } = require('node:net');
+const WebSocket = require('ws');
+const forge = require('node-forge');
+
+const INVITE_PREFIX = 'RD1.';
+const LIFETIME = 10 * 60 * 1000;
+const MAX_PACKET = 160 * 1024;
+const READY = 'ready-v1';
+const options = { maxPayload: MAX_PACKET, perMessageDeflate: false };
+const hash = data => crypto.createHash('sha256').update(data).digest();
+const b64 = data => data.toString('base64url');
+const generateKeyPair = promisify(crypto.generateKeyPair);
+
+function peerName(value) {
+  return (typeof value === 'string' ? value : '').replace(/[\p{Cc}\p{Cf}]/gu, '').trim().slice(0, 64) || '另一台电脑';
+}
+
+function relayURL(value) {
+  let url;
+  try { url = new URL(value); } catch { /* Report one localized validation error. */ }
+  if (!url || url.protocol !== 'wss:' || url.username || url.password || url.search || url.hash || value.length > 512) {
+    throw new Error('信令地址需采用 wss://，并且不包含用户名、密码、查询参数或片段。');
+  }
+  return url.toString();
+}
+
+function isDigest(value) {
+  return typeof value === 'string' && /^[\w-]{43}$/.test(value) && b64(Buffer.from(value, 'base64url')) === value;
+}
+
+function invitation(value) {
+  const fail = () => { throw new Error('配对邀请格式无效，请复制完整邀请。'); };
+  if (typeof value !== 'string' || value.length > 4096 || !value.trim().startsWith(INVITE_PREFIX)) fail();
+  let spec;
+  try { spec = JSON.parse(Buffer.from(value.trim().slice(INVITE_PREFIX.length), 'base64url').toString()); } catch { fail(); }
+  if (!spec || !isDigest(spec.key) || !Number.isSafeInteger(spec.exp)) fail();
+  if (spec.exp < Date.now()) throw new Error('配对邀请已过期，请让共享端创建新邀请。');
+  if (spec.relay) {
+    if (typeof spec.relay !== 'string') fail();
+    spec.relay = relayURL(spec.relay);
+  } else if (!isDigest(spec.pin) || !Number.isInteger(spec.port) || spec.port < 1 || spec.port > 65535 ||
+      !Array.isArray(spec.ips) || spec.ips.length === 0 || spec.ips.length > 8 ||
+      !spec.ips.every(ip => typeof ip === 'string' && isIP(ip) && !ip.includes('%'))) fail();
+  return spec;
+}
+
+function addresses(override) {
+  if (override) {
+    if (typeof override !== 'string' || !isIP(override) || override.includes('%')) throw new Error('指定的本机地址须为 IPv4 或 IPv6 地址。');
+    return [override];
+  }
+  const entries = Object.values(os.networkInterfaces()).flat().filter(iface =>
+    iface && !iface.internal && !iface.scopeid && !/^fe[89ab]/i.test(iface.address));
+  const ips = [...new Set(entries.sort((a, b) => isIP(a.address) - isIP(b.address)).map(iface => iface.address))];
+  return ips.length ? ips.slice(0, 8) : ['127.0.0.1'];
+}
+
+async function certificate() {
+  const keys = await generateKeyPair('rsa', {
+    modulusLength: 2048,
+    publicKeyEncoding: { type: 'spki', format: 'pem' },
+    privateKeyEncoding: { type: 'pkcs8', format: 'pem' }
+  });
+  const cert = forge.pki.createCertificate();
+  cert.publicKey = forge.pki.publicKeyFromPem(keys.publicKey);
+  cert.serialNumber = '01' + crypto.randomBytes(14).toString('hex');
+  cert.validity.notBefore = new Date(Date.now() - 60000);
+  cert.validity.notAfter = new Date(Date.now() + 24 * 3600000);
+  const subject = [{ name: 'commonName', value: 'Local desktop pairing' }];
+  cert.setSubject(subject);
+  cert.setIssuer(subject);
+  cert.sign(forge.pki.privateKeyFromPem(keys.privateKey), forge.md.sha256.create());
+  const pem = forge.pki.certificateToPem(cert);
+  return { key: keys.privateKey, cert: pem, pin: b64(hash(new crypto.X509Certificate(pem).raw)) };
+}
+
+function isSignal(x) {
+  if (!x || typeof x !== 'object') return false;
+  if (x.type === 'offer' || x.type === 'answer') return typeof x.sdp === 'string' && x.sdp.length <= 128 * 1024;
+  if (x.type !== 'candidate') return false;
+  return x.candidate === null || (typeof x.candidate === 'object' && x.candidate && typeof x.candidate.candidate === 'string' &&
+    x.candidate.candidate.length <= 4096 && JSON.stringify(x.candidate).length <= 8192);
+}
+
+// Both directions use distinct keys. A fresh viewer salt binds one handshake;
+// the host challenge requires live possession of the invite before any prompt.
+function channelKeys(secret, salt) {
+  const derive = role => Buffer.from(crypto.hkdfSync('sha256', secret, salt, 'rd1-signaling-' + role, 32));
+  return { host: derive('host'), viewer: derive('viewer') };
+}
+
+function write(peer, message) {
+  if (peer.ws.readyState !== WebSocket.OPEN || peer.ws.bufferedAmount > MAX_PACKET * 4) throw new Error('连接已中断。');
+  const data = Buffer.from(JSON.stringify(message));
+  if (data.length > MAX_PACKET - 48) throw new Error('连接消息过长。');
+  const header = Buffer.allocUnsafe(32);
+  peer.salt.copy(header, 0);
+  header.writeUInt32BE(peer.sent++, 16);
+  crypto.randomFillSync(header, 20, 12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', peer.keys[peer.role], header.subarray(20));
+  cipher.setAAD(header);
+  const ciphertext = Buffer.concat([cipher.update(data), cipher.final()]);
+  peer.ws.send(Buffer.concat([header, cipher.getAuthTag(), ciphertext]));
+}
+
+function read(peer, secret, data) {
+  if (!Buffer.isBuffer(data) || data.length < 50 || data.length > MAX_PACKET || data.readUInt32BE(16) !== peer.received) {
+    throw new Error('Invalid signaling packet');
+  }
+  const salt = data.subarray(0, 16);
+  if (!peer.keys) {
+    peer.salt = Buffer.from(salt);
+    peer.keys = channelKeys(secret, salt);
+  }
+  if (!peer.salt.equals(salt)) throw new Error('Invalid signaling session');
+  const remote = peer.role === 'host' ? 'viewer' : 'host';
+  const decipher = crypto.createDecipheriv('aes-256-gcm', peer.keys[remote], data.subarray(20, 32));
+  decipher.setAAD(data.subarray(0, 32));
+  decipher.setAuthTag(data.subarray(32, 48));
+  const plain = Buffer.concat([decipher.update(data.subarray(48)), decipher.final()]);
+  peer.received++;
+  return JSON.parse(plain.toString('utf8'));
+}
+
+function rendezvous(spec, role) {
+  const url = new URL(spec.relay);
+  const room = crypto.createHmac('sha256', Buffer.from(spec.key, 'base64url')).update('rd1-rendezvous').digest('base64url');
+  url.searchParams.set('room', room);
+  url.searchParams.set('role', role);
+  return url.toString();
+}
+
+function dial(s, url, pin) {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(url, {
+      ...options, followRedirects: false, handshakeTimeout: pin ? 4500 : 9000,
+      minVersion: 'TLSv1.2', rejectUnauthorized: !pin
+    });
+    s.sockets.add(ws);
+    // The direct certificate is ephemeral. Verify the invite's exact SHA-256
+    // pin on the upgrade response, before a single application byte is sent.
+    let verified = !pin;
+    let settled = false;
+    const fail = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(new Error(pin ? '未能验证或连接到共享端。' : '无法连接信令服务，或邀请已被使用。'));
+      ws.terminate();
+    };
+    const ready = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(ws);
+    };
+    const timer = setTimeout(fail, pin ? 5000 : 10000);
+    ws.on('error', fail);
+    ws.once('close', () => { s.sockets.delete(ws); fail(); });
+    if (pin) {
+      ws.once('upgrade', response => {
+        const raw = response.socket.getPeerCertificate().raw;
+        verified = !!raw && crypto.timingSafeEqual(hash(raw), Buffer.from(pin, 'base64url'));
+        if (!verified) fail();
+      });
+      ws.once('open', () => verified ? ready() : fail());
+    } else {
+      ws.once('message', (message, binary) => !binary && message.toString() === READY ? ready() : fail());
+    }
+  });
+}
+
+function listen(server, port, host) {
+  return new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(port, host, () => { server.removeListener('error', reject); resolve(); });
+  });
+}
+
+class PairingNetwork extends EventEmitter {
+  state = null;
+
+  begin(role, name, secret) {
+    if (this.state) throw new Error('请先结束当前配对或连接。');
+    const state = { role, name: peerName(name), secret, sockets: new Set(), rawSockets: new Set(), peer: null };
+    this.state = state;
+    return state;
+  }
+
+  live(s) {
+    if (this.state !== s) throw new Error('连接已结束。');
+  }
+
+  async host({ name, address, relayUrl } = {}) {
+    const spec = { key: b64(crypto.randomBytes(32)), exp: Date.now() + LIFETIME };
+    const s = this.begin('host', name, Buffer.from(spec.key, 'base64url'));
+    try {
+      if (relayUrl) {
+        spec.relay = relayURL(relayUrl);
+        const ws = await dial(s, rendezvous(spec, 'host'));
+        this.live(s);
+        this.attach(s, ws, true);
+      } else {
+        spec.ips = addresses(address);
+        const tls = await certificate();
+        this.live(s);
+        spec.pin = tls.pin;
+        s.server = https.createServer({ key: tls.key, cert: tls.cert, minVersion: 'TLSv1.2', handshakeTimeout: 5000 }, (_req, res) => {
+          res.writeHead(404, { Connection: 'close' }); res.end();
+        });
+        s.server.maxConnections = 20;
+        s.server.headersTimeout = 8000;
+        s.server.on('connection', socket => {
+          s.rawSockets.add(socket);
+          socket.once('close', () => s.rawSockets.delete(socket));
+        });
+        s.wss = new WebSocket.Server({ ...options, server: s.server, path: '/pair', verifyClient: () => !s.peer && s.sockets.size < 12 });
+        s.wss.on('error', () => { if (s.server.listening) this.end(s, '本机配对服务已中断。'); });
+        s.wss.on('connection', ws => { s.sockets.add(ws); this.attach(s, ws, false); });
+        try { await listen(s.server, 0, '::'); }
+        catch (error) {
+          if (!['EAFNOSUPPORT', 'EADDRNOTAVAIL', 'EPROTONOSUPPORT'].includes(error.code)) throw error;
+          await listen(s.server, 0, '0.0.0.0');
+          spec.ips = spec.ips.filter(ip => isIP(ip) === 4);
+          if (!spec.ips.length) throw new Error('当前系统仅支持 IPv4 监听，请选择 IPv4 地址。');
+        }
+        this.live(s);
+        s.server.on('error', () => this.end(s, '本机配对服务已中断。'));
+        spec.port = s.server.address().port;
+      }
+      s.expires = setTimeout(() => this.end(s, '邀请已过期。'), Math.max(1, spec.exp - Date.now()));
+      return { invite: INVITE_PREFIX + b64(Buffer.from(JSON.stringify(spec))), expiresAt: spec.exp };
+    } catch (err) { this.end(s, '', false); throw err; }
+  }
+
+  async join({ invite, name, relayUrl } = {}) {
+    const spec = invitation(invite);
+    if (spec.relay && (!relayUrl || relayURL(relayUrl) !== spec.relay)) {
+      throw new Error('这是一份跨网邀请。请先在两端配置相同且受信任的 wss:// 信令地址。');
+    }
+    const s = this.begin('viewer', name, Buffer.from(spec.key, 'base64url'));
+    try {
+      let ws;
+      if (spec.relay) ws = await dial(s, rendezvous(spec, 'viewer'));
+      else {
+        try {
+          ws = await Promise.any(spec.ips.map(ip => dial(s, 'wss://' + (isIP(ip) === 6 ? '[' + ip + ']' : ip) + ':' + spec.port + '/pair', spec.pin)));
+        } catch {
+          throw new Error('无法验证或连接共享端。请确认两端处于同一局域网或 VPN、邀请有效且防火墙允许连接。');
+        }
+        for (const other of s.sockets) if (other !== ws) other.terminate();
+      }
+      this.live(s);
+      const p = this.attach(s, ws, !!spec.relay);
+      s.peer = p;
+      p.salt = crypto.randomBytes(16);
+      p.keys = channelKeys(s.secret, p.salt);
+      write(p, { op: 'hello', name: s.name });
+    } catch (err) { this.end(s, '', false); throw err; }
+  }
+
+  attach(s, ws, relayed) {
+    const p = { ws, role: s.role, phase: 'initial', sent: 0, received: 0 };
+    const fail = () => {
+      if (s.peer === p || relayed) this.end(s, '配对或网络连接已中断。');
+      else ws.terminate();
+    };
+    // A relay host is already connected to the rendezvous while waiting for an invite recipient.
+    if (s.role === 'viewer' || !relayed) p.timeout = setTimeout(fail, 10000);
+    let alive = true;
+    const heartbeat = setInterval(() => {
+      if (!alive) return fail();
+      alive = false;
+      if (ws.readyState === WebSocket.OPEN) ws.ping();
+    }, 15000);
+    ws.on('pong', () => { alive = true; });
+    ws.on('error', fail);
+    ws.once('close', () => {
+      clearInterval(heartbeat);
+      clearTimeout(p.timeout);
+      s.sockets.delete(ws);
+      if (this.state === s && (s.peer === p || relayed)) this.end(s, '对端已断开，连接已结束。');
+    });
+    ws.on('message', (data, binary) => {
+      if (this.state !== s) return;
+      try {
+        if (!binary) throw new Error('Binary message required');
+        this.receive(s, p, read(p, s.secret, data));
+      } catch { fail(); }
+    });
+    return p;
+  }
+
+  receive(s, p, msg) {
+    if (p.phase === 'active' && msg.op === 'signal' && isSignal(msg.payload)) {
+      this.emit('event', { type: 'signal', payload: msg.payload });
+      return;
+    }
+    if (s.role === 'host' && !s.peer && p.phase === 'initial' && msg.op === 'hello') {
+      p.name = peerName(msg.name);
+      p.challenge = b64(crypto.randomBytes(24));
+      p.phase = 'proof';
+      write(p, { op: 'challenge', value: p.challenge });
+      return;
+    }
+    if (s.role === 'host' && !s.peer && p.phase === 'proof' && msg.op === 'proof' && msg.value === p.challenge) {
+      s.peer = p;
+      s.server?.close();
+      p.phase = 'pending';
+      for (const other of s.sockets) if (other !== p.ws) other.terminate();
+      clearTimeout(p.timeout);
+      p.timeout = setTimeout(() => this.end(s, '等待共享端确认超时。'), 90000);
+      this.emit('event', { type: 'request', name: p.name });
+      return;
+    }
+    if (s.role === 'viewer' && p.phase === 'initial' && msg.op === 'challenge' && typeof msg.value === 'string' && msg.value.length === 32) {
+      p.phase = 'pending';
+      clearTimeout(p.timeout);
+      p.timeout = setTimeout(() => this.end(s, '等待共享端确认超时。'), 95000);
+      write(p, { op: 'proof', value: msg.value });
+      return;
+    }
+    if (s.role === 'viewer' && p.phase === 'pending') {
+      if (msg.op === 'allow') { p.name = peerName(msg.name); this.connected(s, p); return; }
+      if (msg.op === 'deny') { this.end(s, '共享端已拒绝请求。'); return; }
+    }
+    throw new Error('Unexpected signaling message');
+  }
+
+  respond(allow) {
+    const s = this.state;
+    const p = s?.peer;
+    if (s?.role !== 'host' || p?.phase !== 'pending' || typeof allow !== 'boolean') throw new Error('当前没有等待确认的请求。');
+    if (allow) { write(p, { op: 'allow', name: s.name }); this.connected(s, p); }
+    else {
+      write(p, { op: 'deny' });
+      this.end(s, '已拒绝连接请求。', true, p.ws);
+    }
+  }
+
+  connected(s, p) {
+    clearTimeout(s.expires);
+    clearTimeout(p.timeout);
+    p.phase = 'active';
+    this.emit('event', { type: 'connected', role: s.role, name: p.name });
+  }
+
+  signal(payload) {
+    const p = this.state?.peer;
+    if (p?.phase !== 'active' || !isSignal(payload)) throw new Error('连接尚未就绪或信令无效。');
+    write(p, { op: 'signal', payload });
+  }
+
+  end(s, reason, notify = true, graceful = null) {
+    if (this.state !== s) return;
+    this.state = null;
+    clearTimeout(s.expires);
+    if (s.peer) clearTimeout(s.peer.timeout);
+    for (const ws of s.sockets) {
+      if (ws === graceful) ws.close();
+      else ws.terminate();
+    }
+    s.wss?.close();
+    s.server?.close();
+    for (const socket of s.rawSockets) {
+      // Allow a queued authenticated rejection to flush before closing its TLS socket.
+      if (graceful) { const timer = setTimeout(() => socket.destroy(), 500); timer.unref(); }
+      else socket.destroy();
+    }
+    if (notify) this.emit('event', { type: 'closed', reason });
+  }
+
+  stop() {
+    if (this.state) this.end(this.state, '连接已结束。');
+  }
+}
+
+module.exports = { PairingNetwork };

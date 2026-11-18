@@ -1,0 +1,11 @@
+node_modules/
+release/
+native/bin/
+.DS_Store
+*.log
+.openai/
+website/dist/downloads/
+website/dist/updates/
+*.key
+*private*.pem
+signing-key.pem

@@ -1,0 +1,118 @@
+'use strict';
+
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const { randomBytes, generateKeyPairSync } = require('node:crypto');
+const https = require('node:https');
+const tls = require('node:tls');
+const forge = require('node-forge');
+const { PairingNetwork } = require('../src/network.cjs');
+const { createRelay } = require('../relay/server.cjs');
+
+function next(net, type) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { net.off('event', receive); reject(new Error('Timed out waiting for ' + type)); }, 3000);
+    const receive = event => {
+      if (event.type !== type) return;
+      net.off('event', receive);
+      clearTimeout(timer);
+      resolve(event);
+    };
+    net.on('event', receive);
+  });
+}
+
+function change(invite, fields) {
+  const spec = JSON.parse(Buffer.from(invite.slice(4), 'base64url').toString());
+  return 'RD1.' + Buffer.from(JSON.stringify({ ...spec, ...fields })).toString('base64url');
+}
+
+async function roundTrip(t, config) {
+  const host = new PairingNetwork();
+  const viewer = new PairingNetwork();
+  t.after(() => { viewer.stop(); host.stop(); });
+  const { invite } = await host.host({ name: '共享端', ...config });
+  const request = next(host, 'request');
+  await viewer.join({ invite, name: '控制端', relayUrl: config.relayUrl });
+  assert.equal((await request).name, '控制端');
+  assert.throws(() => viewer.signal({ type: 'candidate', candidate: null }), /尚未就绪/);
+  const approved = next(viewer, 'connected');
+  host.respond(true);
+  assert.deepEqual(await approved, { type: 'connected', role: 'viewer', name: '共享端' });
+  const offer = { type: 'offer', sdp: 'v=0\r\n' };
+  const incoming = next(viewer, 'signal');
+  host.signal(offer);
+  assert.deepEqual((await incoming).payload, offer);
+  const candidate = { type: 'candidate', candidate: null };
+  const response = next(host, 'signal');
+  viewer.signal(candidate);
+  assert.deepEqual((await response).payload, candidate);
+  const closed = next(host, 'closed');
+  viewer.stop();
+  await closed;
+  assert.throws(() => host.signal(candidate), /尚未就绪/);
+}
+
+test('pinned direct transport authorizes one session and forwards both signal directions', async t => {
+  await roundTrip(t, { address: '127.0.0.1' });
+});
+
+test('wrong pin, expired invite and wrong key leave the host free to decline a valid viewer', async t => {
+  const host = new PairingNetwork();
+  const viewer = new PairingNetwork();
+  const second = new PairingNetwork();
+  t.after(() => { host.stop(); viewer.stop(); second.stop(); });
+  const { invite } = await host.host({ address: '127.0.0.1' });
+  let requests = 0;
+  host.on('event', e => { if (e.type === 'request') requests++; });
+  await assert.rejects(viewer.join({ invite: change(invite, { pin: randomBytes(32).toString('base64url') }) }), /验证/);
+  await assert.rejects(viewer.join({ invite: change(invite, { exp: Date.now() - 1 }) }), /过期/);
+  const failed = next(viewer, 'closed');
+  await viewer.join({ invite: change(invite, { key: randomBytes(32).toString('base64url') }) });
+  await failed;
+  assert.equal(requests, 0);
+  const request = next(host, 'request');
+  await viewer.join({ invite, name: 'guest' });
+  await request;
+  await assert.rejects(second.join({ invite, name: 'second' }), /连接/);
+  assert.equal(requests, 1);
+  const denied = next(viewer, 'closed');
+  host.respond(false);
+  assert.match((await denied).reason, /拒绝/);
+});
+
+test('a configured, TLS-verified relay forwards encrypted signaling and enforces a local URL match', async t => {
+  const keys = generateKeyPairSync('rsa', {
+    modulusLength: 2048,
+    publicKeyEncoding: { type: 'spki', format: 'pem' },
+    privateKeyEncoding: { type: 'pkcs8', format: 'pem' }
+  });
+  const cert = forge.pki.createCertificate();
+  cert.publicKey = forge.pki.publicKeyFromPem(keys.publicKey);
+  cert.serialNumber = '01' + randomBytes(8).toString('hex');
+  cert.validity.notBefore = new Date(Date.now() - 60000);
+  cert.validity.notAfter = new Date(Date.now() + 60000);
+  const name = [{ name: 'commonName', value: 'localhost' }];
+  cert.setSubject(name);
+  cert.setIssuer(name);
+  cert.setExtensions([{ name: 'subjectAltName', altNames: [{ type: 7, ip: '127.0.0.1' }] }]);
+  cert.sign(forge.pki.privateKeyFromPem(keys.privateKey), forge.md.sha256.create());
+  const pem = forge.pki.certificateToPem(cert);
+  const server = https.createServer({ key: keys.privateKey, cert: pem });
+  const relay = createRelay(server);
+  t.after(() => { relay.close(); server.close(); });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const relayUrl = 'wss://127.0.0.1:' + server.address().port + '/pair';
+  const host = new PairingNetwork();
+  await assert.rejects(host.host({ relayUrl }), /信令/);
+  const oldTrust = tls.getCACertificates('default');
+  tls.setDefaultCACertificates([...oldTrust, pem]);
+  t.after(() => tls.setDefaultCACertificates(oldTrust));
+  const { invite } = await host.host({ relayUrl });
+  t.after(() => host.stop());
+  const viewer = new PairingNetwork();
+  await assert.rejects(viewer.join({ invite }), /两端配置相同/);
+  await assert.rejects(viewer.join({ invite, relayUrl: 'wss://example.invalid/pair' }), /两端配置相同/);
+  host.stop();
+  await roundTrip(t, { relayUrl });
+});

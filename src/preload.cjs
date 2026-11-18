@@ -1,0 +1,29 @@
+const { contextBridge, ipcRenderer } = require('electron')
+
+const call = name => (...args) => ipcRenderer.invoke('jianping:' + name, ...args).catch(error => {
+  const message = String(error.message).replace(/^Error invoking remote method .*?: (?:Error: )?/, '')
+  throw new Error(message)
+})
+contextBridge.exposeInMainWorld('jianping', {
+  info: call('info'),
+  setLanguage: call('language'),
+  checkUpdate: call('check-update'),
+  downloadUpdate: call('download-update'),
+  installUpdate: call('install-update'),
+  host: call('host'),
+  join: call('join'),
+  accept: call('accept'),
+  reject: call('reject'),
+  screens: call('screens'),
+  signal: call('signal'),
+  input: payload => ipcRenderer.send('jianping:input', payload),
+  disconnect: call('disconnect'),
+  copy: call('copy'),
+  settings: call('settings'),
+  saveSettings: call('settings'),
+  onEvent(listener) {
+    const handle = (_event, update) => listener(update)
+    ipcRenderer.on('jianping:event', handle)
+    return () => ipcRenderer.removeListener('jianping:event', handle)
+  }
+})

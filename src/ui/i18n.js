@@ -1,0 +1,259 @@
+'use strict';
+
+// Source phrases remain stable keys so native errors can use the same catalog.
+window.ccI18n = (() => {
+  const messages = {
+    '更新任务正在进行，请稍候。': ['更新工作正在進行，請稍候。', 'An update is already in progress. Please wait.'],
+    '无法获取更新，请检查网络后重试。': ['無法取得更新，請檢查網路後重試。', 'Could not check for updates. Check your connection and try again.'],
+    '更新信息验证失败，请稍后重试。': ['更新資訊驗證失敗，請稍後重試。', 'Update information could not be verified. Try again later.'],
+    '此更新版本早于已检查的版本，已取消更新。': ['此更新版本早於已檢查的版本，已取消更新。', 'This update is older than the version already checked. The update was cancelled.'],
+    '此系统暂不支持应用内更新。': ['此系統暫不支援應用程式內更新。', 'In-app updates are unavailable on this system.'],
+    '更新文件校验失败，请重新下载。': ['更新檔案驗證失敗，請重新下載。', 'The update file could not be verified. Download it again.'],
+    '更新下载失败，请检查网络和可用磁盘空间后重试。': ['更新下載失敗，請檢查網路與可用磁碟空間後重試。', 'The update download failed. Check your connection and free disk space, then try again.'],
+    '更新已取消。': ['更新已取消。', 'The update was cancelled.'],
+    '请先将 CC Connect 移到「应用程序」文件夹，再安装更新。': ['請先將 CC Connect 移到「應用程式」資料夾，再安裝更新。', 'Move CC Connect to the Applications folder before installing updates.'],
+    '当前账户无法更新此应用，请检查「应用程序」文件夹的写入权限。': ['目前帳戶無法更新此應用程式，請檢查「應用程式」資料夾的寫入權限。', 'This account cannot update the app. Check write access to the Applications folder.'],
+    '安装更新失败，原应用已保留。请重试或下载安装包。': ['安裝更新失敗，原應用程式已保留。請重試或下載安裝程式。', 'The update could not be installed. The previous app was kept. Try again or download the installer.'],
+    '上次更新未能完成，已保留原应用。请重新下载更新。': ['上次更新無法完成，已保留原應用程式。請重新下載更新。', 'The last update did not finish. The previous app was kept. Download the update again.'],
+    '请先下载并验证更新。': ['請先下載並驗證更新。', 'Download and verify the update first.'],
+
+    '更新': ['更新', 'Update'],
+    '软件更新': ['軟體更新', 'Software update'],
+    '检查更新': ['檢查更新', 'Check for updates'],
+    '当前版本 {version}': ['目前版本 {version}', 'Current version {version}'],
+    '检查是否有新版本。': ['檢查是否有新版本。', 'Check for a newer version.'],
+    '正在检查更新…': ['正在檢查更新…', 'Checking for updates…'],
+    '你已使用最新版本。': ['你已使用最新版本。', 'You’re up to date.'],
+    '新版本 {version} 已可下载。': ['新版本 {version} 已可下載。', 'Version {version} is available.'],
+    '下载更新': ['下載更新', 'Download update'],
+    '正在下载更新 · {progress}%': ['正在下載更新 · {progress}%', 'Downloading update · {progress}%'],
+    '下载进度': ['下載進度', 'Download progress'],
+    '更新已准备好。': ['更新已準備好。', 'The update is ready.'],
+    '安装更新': ['安裝更新', 'Install update'],
+    '安装时会关闭 CC Connect。': ['安裝時會關閉 CC Connect。', 'CC Connect will close during installation.'],
+    '正在安装更新…': ['正在安裝更新…', 'Installing update…'],
+    '安装程序已打开。': ['安裝程式已開啟。', 'The installer is open.'],
+    '请按安装窗口的步骤完成更新。': ['請依安裝視窗的步驟完成更新。', 'Follow the installer to finish updating.'],
+    '检查更新失败。请检查网络连接后重试。': ['檢查更新失敗。請檢查網路連線後重試。', 'Could not check for updates. Check your connection and try again.'],
+    '下载失败。请检查网络连接后重试。': ['下載失敗。請檢查網路連線後重試。', 'The download failed. Check your connection and try again.'],
+    '无法启动更新安装，请重试。': ['無法啟動更新安裝，請重試。', 'Could not start the installer. Please try again.'],
+    '重试': ['重試', 'Try again'],
+    '请先结束远程连接，再安装更新。': ['請先結束遠端連線，再安裝更新。', 'End the remote connection before installing an update.'],
+
+    '远程连接': ['遠端連線', 'Remote access'],
+    '连接设置': ['連線設定', 'Connection settings'],
+    '语言': ['語言', 'Language'],
+    '配对': ['配對', 'Pairing'],
+    '连接方式': ['連線方式', 'Connection mode'],
+    '连接设备': ['連接裝置', 'Connect'],
+    '共享此机': ['分享此電腦', 'Share this device'],
+    '共享此设备': ['分享此裝置', 'Share this device'],
+    '对方的配对码': ['對方的配對碼', 'Pairing code'],
+    '粘贴对方从「共享此机」生成的配对码': ['貼上對方產生的配對碼', 'Paste the code from the sharing device'],
+    '本机的配对码': ['本機的配對碼', 'Your pairing code'],
+    '本机配对码': ['本機配對碼', 'Your pairing code'],
+    '复制配对码': ['複製配對碼', 'Copy pairing code'],
+    '生成配对码': ['產生配對碼', 'Create pairing code'],
+    '取消邀请': ['取消邀請', 'Cancel invitation'],
+    '等待对方确认…': ['等待對方確認…', 'Waiting for approval…'],
+    '取消': ['取消', 'Cancel'],
+    '本机设备': ['本機裝置', 'This device'],
+    '本机': ['本機', 'This device'],
+    '我的电脑': ['我的電腦', 'My computer'],
+    '另一台电脑': ['另一台電腦', 'Another computer'],
+    '正在读取设备…': ['正在讀取裝置…', 'Loading device…'],
+    '接收画质': ['接收畫質', 'Quality'],
+    '流畅优先': ['流暢優先', 'Smooth'],
+    '均衡模式': ['均衡模式', 'Balanced'],
+    '清晰优先': ['清晰優先', 'Sharp'],
+    '流畅': ['流暢', 'Smooth'],
+    '均衡': ['均衡', 'Balanced'],
+    '清晰': ['清晰', 'Sharp'],
+    '最高 720p · 30 帧/秒': ['最高 720p · 30 幀/秒', 'Up to 720p · 30 fps'],
+    '最高 1080p · 60 帧/秒': ['最高 1080p · 60 幀/秒', 'Up to 1080p · 60 fps'],
+    '最高 1440p · 60 帧/秒': ['最高 1440p · 60 幀/秒', 'Up to 1440p · 60 fps'],
+    '切换全屏': ['切換全螢幕', 'Toggle full screen'],
+    '结束连接': ['結束連線', 'Disconnect'],
+    '远程屏幕': ['遠端螢幕', 'Remote screen'],
+    '正在接收远程画面…': ['正在接收遠端畫面…', 'Receiving the remote screen…'],
+    '正在建立屏幕共享': ['正在建立螢幕分享', 'Starting screen sharing'],
+    '开始共享': ['開始分享', 'Start sharing'],
+    '正在协商加密连接…': ['正在建立加密連線…', 'Establishing an encrypted connection…'],
+    '允许共享屏幕？': ['允許分享螢幕？', 'Allow screen sharing?'],
+    '共享屏幕': ['分享螢幕', 'Screen to share'],
+    '允许对方使用键盘和鼠标': ['允許對方使用鍵盤和滑鼠', 'Allow keyboard and mouse control'],
+    '拒绝': ['拒絕', 'Decline'],
+    '关闭': ['關閉', 'Close'],
+    '配对服务': ['配對服務', 'Pairing server'],
+    '局域网可留空': ['區域網路可留空', 'Optional on LAN'],
+    'TURN 中继': ['TURN 中繼', 'TURN relay'],
+    '选填': ['選填', 'Optional'],
+    'TURN 用户名': ['TURN 使用者名稱', 'TURN username'],
+    'TURN 密码': ['TURN 密碼', 'TURN password'],
+    '保存设置': ['儲存設定', 'Save'],
+    '同一局域网或 VPN 可留空。跨公网时，两端填写相同的配对服务，并填写你的 TURN 中继凭据。': ['同一區域網路或 VPN 可留空。跨公網時，兩端填寫相同的配對服務，並填寫你的 TURN 中繼憑證。', 'Leave blank on the same LAN or VPN. Across the internet, use the same pairing server on both devices and enter your TURN relay credentials.'],
+    '配对服务交换连接信息。TURN 在无法直连时转发加密画面。': ['配對服務交換連線資訊。TURN 會在無法直連時轉送加密畫面。', 'The pairing server exchanges connection details. TURN relays encrypted video when a direct connection is unavailable.'],
+    '等待配对': ['等待配對', 'Ready to pair'],
+    '待连接': ['待連線', 'Ready'],
+    '正在配对': ['正在配對', 'Pairing'],
+    '正在创建邀请': ['正在建立邀請', 'Creating invitation'],
+    '连接失败，请重试。': ['連線失敗，請重試。', 'Connection failed. Please try again.'],
+    '连接已结束。': ['連線已結束。', 'Connection ended.'],
+    '连接已结束': ['連線已結束', 'Connection ended'],
+    '等待时间已到，请确认对方仍在等待配对。': ['等待時間已到，請確認對方仍在等待配對。', 'Pairing timed out. Check that the other device is still waiting.'],
+    '请只发给受邀人。': ['請只傳給受邀者。', 'Share only with the person you invited.'],
+    '配对码已过期。请生成新的配对码。': ['配對碼已過期。請產生新的配對碼。', 'The pairing code expired. Create a new code.'],
+    '剩余 {time} 有效': ['剩餘 {time} 有效', 'Expires in {time}'],
+    '已取消配对。': ['已取消配對。', 'Pairing cancelled.'],
+    '邀请已取消。': ['邀請已取消。', 'Invitation cancelled.'],
+    '配对码已复制。': ['配對碼已複製。', 'Pairing code copied.'],
+    '已保存': ['已儲存', 'Saved'],
+    '连接设置已保存。': ['連線設定已儲存。', 'Connection settings saved.'],
+    '远端设备': ['遠端裝置', 'Remote device'],
+    '收到连接请求': ['收到連線請求', 'Connection requested'],
+    '允许「{name}」查看屏幕？': ['允許「{name}」查看螢幕？', 'Let “{name}” view your screen?'],
+    '本机仅支持观看。': ['本機僅支援觀看。', 'This device supports view-only sharing.'],
+    '正在读取屏幕…': ['正在讀取螢幕…', 'Loading screens…'],
+    '屏幕 {number}': ['螢幕 {number}', 'Screen {number}'],
+    '未找到可共享的屏幕，请检查系统屏幕录制权限。': ['找不到可分享的螢幕，請檢查系統螢幕錄製權限。', 'No screen is available. Check the system screen-recording permission.'],
+    '已拒绝连接请求。': ['已拒絕連線請求。', 'Connection request declined.'],
+    '允许键鼠控制': ['允許鍵鼠控制', 'Keyboard and mouse enabled'],
+    '可控制 · Shift + Esc 释放键鼠': ['可控制 · Shift + Esc 釋放鍵鼠', 'Control enabled · Shift + Esc to release'],
+    '仅观看': ['僅觀看', 'View only'],
+    '键鼠控制暂时不可用，已切换为仅观看。': ['鍵鼠控制暫時無法使用，已切換為僅觀看。', 'Keyboard and mouse control is unavailable. View-only sharing continues.'],
+    '当前编码器未接受画质限制，将按网络状况发送。': ['目前編碼器未接受畫質限制，將依網路狀況傳送。', 'The encoder could not apply this quality limit. Quality will follow network conditions.'],
+    '控制通道已关闭，会话已结束。': ['控制通道已關閉，工作階段已結束。', 'The control channel closed. The session has ended.'],
+    '加密中继': ['加密中繼', 'Encrypted relay'],
+    '加密直连': ['加密直連', 'Encrypted direct'],
+    '往返 {ms} ms': ['往返 {ms} ms', 'RTT {ms} ms'],
+    '已加密': ['已加密', 'Encrypted'],
+    '{fps} 帧/秒': ['{fps} 幀/秒', '{fps} fps'],
+    '正在共享': ['正在分享', 'Sharing'],
+    '已连接': ['已連線', 'Connected'],
+    '你的屏幕正在共享': ['你的螢幕正在分享', 'Your screen is being shared'],
+    '无法建立媒体连接。跨公网时，请检查两端的 TURN 中继设置。': ['無法建立媒體連線。跨公網時，請檢查兩端的 TURN 中繼設定。', 'The video connection failed. Across the internet, check the TURN settings on both devices.'],
+    '正在恢复连接': ['正在恢復連線', 'Reconnecting'],
+    '网络连接中断，正在等待恢复…': ['網路連線中斷，正在等待恢復…', 'Connection interrupted. Waiting to reconnect…'],
+    '网络连接超时，已结束会话。': ['網路連線逾時，已結束工作階段。', 'The connection timed out. The session has ended.'],
+    '向「{name}」共享屏幕': ['向「{name}」分享螢幕', 'Sharing with “{name}”'],
+    '正在连接': ['正在連線', 'Connecting'],
+    '等待画面超时。请核实录屏权限和两端的网络设置。': ['等待畫面逾時。請確認錄影權限與兩端的網路設定。', 'Video timed out. Check screen-recording permission and both devices’ network settings.'],
+    '未获取到屏幕画面。': ['未取得螢幕畫面。', 'No screen video was captured.'],
+    '本机屏幕共享已停止。': ['本機螢幕分享已停止。', 'Screen sharing stopped on this device.'],
+    '点击开始共享此屏幕': ['點擊開始分享此螢幕', 'Start sharing this screen'],
+    '系统未允许读取屏幕。请在系统设置中允许 CC Connect 录制屏幕，重新打开应用后再连接。': ['系統未允許讀取螢幕。請在系統設定中允許 CC Connect 錄製螢幕，重新開啟應用程式後再連線。', 'Screen access was denied. Allow CC Connect to record the screen in System Settings, then reopen the app.'],
+    '对方已结束连接。': ['對方已結束連線。', 'The other device ended the connection.'],
+    '连接出错。': ['連線發生錯誤。', 'A connection error occurred.'],
+    '请使用桌面应用': ['請使用桌面應用程式', 'Open the desktop app'],
+    '请在 CC Connect 桌面应用中打开此页面。': ['請在 CC Connect 桌面應用程式中開啟此頁面。', 'Open this page in the CC Connect desktop app.'],
+    '网络设置格式有误。': ['網路設定格式有誤。', 'Check the connection settings format.'],
+    '信令地址需要使用 wss://，可带端口和路径。': ['信令位址需要使用 wss://，可包含連接埠和路徑。', 'Use a wss:// pairing address. A port and path are allowed.'],
+    '请输入有效的 turn: 或 turns: 地址。': ['請輸入有效的 turn: 或 turns: 位址。', 'Enter a valid turn: or turns: address.'],
+    '读取网络设置失败。请重新保存网络设置。': ['讀取網路設定失敗。請重新儲存網路設定。', 'Connection settings could not be read. Please save them again.'],
+    'TURN 密码格式有误。': ['TURN 密碼格式有誤。', 'The TURN password format is invalid.'],
+    '请填写 TURN 用户名。': ['請填寫 TURN 使用者名稱。', 'Enter your TURN username.'],
+    '系统凭据存储暂不可用。': ['系統憑證儲存暫時無法使用。', 'The system credential store is unavailable.'],
+    '请填写此 TURN 账户的密码。': ['請填寫此 TURN 帳戶的密碼。', 'Enter the password for this TURN account.'],
+    '信令地址需采用 wss://，并且不包含用户名、密码、查询参数或片段。': ['信令位址須使用 wss://，且不包含使用者名稱、密碼、查詢參數或片段。', 'Use a wss:// pairing URL without credentials, query parameters, or a fragment.'],
+    '配对邀请格式无效，请复制完整邀请。': ['配對邀請格式無效，請複製完整邀請。', 'Invalid pairing code. Copy the complete invitation.'],
+    '配对邀请已过期，请让共享端创建新邀请。': ['配對邀請已過期，請讓分享端建立新邀請。', 'This invitation expired. Ask the sharing device to create a new one.'],
+    '指定的本机地址须为 IPv4 或 IPv6 地址。': ['指定的本機位址須為 IPv4 或 IPv6 位址。', 'The local address must be IPv4 or IPv6.'],
+    '连接已中断。': ['連線已中斷。', 'The connection was interrupted.'],
+    '连接消息过长。': ['連線訊息過長。', 'The connection message is too large.'],
+    '未能验证或连接到共享端。': ['無法驗證或連接分享端。', 'Could not verify or connect to the sharing device.'],
+    '无法连接信令服务，或邀请已被使用。': ['無法連接信令服務，或邀請已被使用。', 'The pairing server is unreachable, or the invitation was already used.'],
+    '请先结束当前配对或连接。': ['請先結束目前的配對或連線。', 'End the current pairing or connection first.'],
+    '本机配对服务已中断。': ['本機配對服務已中斷。', 'The local pairing service stopped.'],
+    '当前系统仅支持 IPv4 监听，请选择 IPv4 地址。': ['目前系統僅支援 IPv4 監聽，請選擇 IPv4 位址。', 'This system only supports IPv4 listening. Choose an IPv4 address.'],
+    '邀请已过期。': ['邀請已過期。', 'The invitation expired.'],
+    '这是一份跨网邀请。请先在两端配置相同且受信任的 wss:// 信令地址。': ['這是一份跨網邀請。請先在兩端設定相同且可信任的 wss:// 信令位址。', 'This invitation uses an internet pairing server. Configure the same trusted wss:// address on both devices first.'],
+    '无法验证或连接共享端。请确认两端处于同一局域网或 VPN、邀请有效且防火墙允许连接。': ['無法驗證或連接分享端。請確認兩端位於同一區域網路或 VPN、邀請有效且防火牆允許連線。', 'Could not reach the sharing device. Check that both devices share a LAN or VPN, the invitation is valid, and the firewall allows the connection.'],
+    '配对或网络连接已中断。': ['配對或網路連線已中斷。', 'Pairing or the network connection was interrupted.'],
+    '对端已断开，连接已结束。': ['對方已中斷，連線已結束。', 'The other device disconnected.'],
+    '等待共享端确认超时。': ['等待分享端確認逾時。', 'Timed out waiting for the sharing device to approve.'],
+    '共享端已拒绝请求。': ['分享端已拒絕請求。', 'The sharing device declined the request.'],
+    '当前没有等待确认的请求。': ['目前沒有等待確認的請求。', 'There is no pending request to approve.'],
+    '连接尚未就绪或信令无效。': ['連線尚未就緒或信令無效。', 'The connection is not ready or the signaling message is invalid.'],
+    '所选显示器不可用。': ['所選顯示器無法使用。', 'The selected display is unavailable.'],
+    '请在系统设置的「隐私与安全性 → 辅助功能」中允许 CC Connect 控制键鼠。': ['請在系統設定的「隱私權與安全性 → 輔助使用」中允許 CC Connect 控制鍵鼠。', 'Allow CC Connect under System Settings → Privacy & Security → Accessibility.'],
+    '无法创建系统输入会话。': ['無法建立系統輸入工作階段。', 'Could not start system input control.'],
+    '请先结束当前配对，或等待网络设置保存完成。': ['請先結束目前配對，或等待網路設定儲存完成。', 'End the current pairing or wait for settings to finish saving.'],
+    '配对状态已改变': ['配對狀態已變更', 'Pairing state changed'],
+    '对方已断开连接': ['對方已中斷連線', 'The other device disconnected'],
+    '连接请求已失效。': ['連線請求已失效。', 'The connection request expired.'],
+    '请在「系统设置 → 隐私与安全性 → 屏幕与系统音频录制」中允许 CC Connect，然后重新打开应用。': ['請在「系統設定 → 隱私權與安全性 → 螢幕與系統音訊錄製」中允許 CC Connect，然後重新開啟應用程式。', 'Allow CC Connect in System Settings → Privacy & Security → Screen & System Audio Recording, then reopen the app.'],
+    '没有可共享的屏幕。请检查系统的屏幕录制权限。': ['沒有可分享的螢幕。請檢查系統的螢幕錄製權限。', 'No screen is available. Check the screen-recording permission.'],
+    '键鼠控制不可用，本次仅共享画面。': ['鍵鼠控制無法使用，本次僅分享畫面。', 'Input control is unavailable. This session is view-only.'],
+    '无效的窗口。': ['無效的視窗。', 'Invalid application window.'],
+    '请先结束当前配对，再修改网络设置。': ['請先結束目前配對，再修改網路設定。', 'End the current pairing before changing connection settings.'],
+    '选定的屏幕已经断开，请重新选择。': ['選定的螢幕已中斷，請重新選擇。', 'The selected screen disconnected. Select it again.'],
+    '无法匹配所选显示器的坐标，本次仅共享画面。': ['無法比對所選顯示器的座標，本次僅分享畫面。', 'Display coordinates could not be matched. This session is view-only.'],
+    '已拒绝请求': ['已拒絕請求', 'Request declined'],
+    '本机已断开连接': ['本機已中斷連線', 'Disconnected on this device'],
+    '本机已结束共享': ['本機已結束分享', 'Sharing ended on this device'],
+    '无法复制邀请。': ['無法複製邀請。', 'Could not copy the invitation.'],
+    '窗口已重新载入': ['視窗已重新載入', 'The window reloaded'],
+    '窗口已关闭': ['視窗已關閉', 'The window closed'],
+    '设备已锁定或休眠': ['裝置已鎖定或休眠', 'The device locked or went to sleep'],
+    '共享显示器配置已更改，请重新配对': ['分享顯示器的設定已變更，請重新配對', 'The shared display changed. Please pair again'],
+    '所选显示器已经变更，请重新共享。': ['所選顯示器已變更，請重新分享。', 'The selected display changed. Start sharing again.'],
+    '系统拒绝了鼠标输入。': ['系統拒絕了滑鼠輸入。', 'The system blocked mouse input.'],
+    '系统拒绝了键鼠输入，请回到普通桌面后重新连接。': ['系統拒絕了鍵鼠輸入，請回到一般桌面後重新連線。', 'The system blocked input. Return to the normal desktop and reconnect.'],
+    '无法识别所选显示器，请重新选择。': ['無法辨識所選顯示器，請重新選擇。', 'The selected display could not be identified. Select it again.'],
+    '无法为所选显示器启用键鼠控制。': ['無法為所選顯示器啟用鍵鼠控制。', 'Input control could not be enabled for the selected display.'],
+    '此系统暂不支持被控键鼠。': ['此系統暫不支援被控鍵鼠。', 'Remote input control is unavailable on this system.'],
+    '已有键鼠控制会话。': ['已有鍵鼠控制工作階段。', 'An input-control session is already active.'],
+    '键鼠授权已取消。': ['鍵鼠授權已取消。', 'Input-control permission was cancelled.'],
+    '键鼠服务启动超时。': ['鍵鼠服務啟動逾時。', 'The input service took too long to start.'],
+    '键鼠服务启动失败，请检查应用是否安装完整。': ['鍵鼠服務啟動失敗，請檢查應用程式是否安裝完整。', 'The input service could not start. Check the app installation.'],
+    '键鼠服务未能启动。': ['鍵鼠服務無法啟動。', 'The input service could not start.'],
+    '键鼠服务已结束。': ['鍵鼠服務已結束。', 'The input service stopped.'],
+    '键鼠输入积压，已停止控制。': ['鍵鼠輸入積壓，已停止控制。', 'Input control stopped because events were backing up.'],
+  };
+
+  let language = 'zh-CN';
+  let savedLanguage;
+  try { savedLanguage = localStorage.getItem('cc-connect-language'); } catch {}
+  function normalize(value) {
+    if (/^zh-(TW|HK|MO|Hant)/i.test(value || '')) return 'zh-TW';
+    if (/^zh/i.test(value || '')) return 'zh-CN';
+    return 'en';
+  }
+  language = normalize(savedLanguage || navigator.language);
+  function t(source, params = {}) {
+    const key = String(source ?? '').replaceAll('见屏', 'CC Connect')
+      .replace(/([\u4e00-\u9fff])CC Connect/g, '$1 CC Connect')
+      .replace(/CC Connect(?=[\u4e00-\u9fff])/g, 'CC Connect ');
+    const translated = language === 'zh-CN' ? key : (messages[key]?.[language === 'zh-TW' ? 0 : 1] ?? key);
+    return translated.replace(/\{(\w+)\}/g, (match, name) => params[name] ?? match);
+  }
+  function translate(message) {
+    const value = String(message ?? '');
+    const screen = /^(?:屏幕|Screen) (\d+)$/.exec(value);
+    return screen ? t('屏幕 {number}', { number: screen[1] }) : t(value);
+  }
+  function apply(root = document) {
+    root.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = t(el.dataset.i18n); });
+    for (const attr of ['placeholder', 'title', 'aria-label']) {
+      root.querySelectorAll('[data-i18n-' + attr + ']').forEach(el =>
+        el.setAttribute(attr, t(el.getAttribute('data-i18n-' + attr))));
+    }
+    document.documentElement.lang = language;
+    document.title = 'CC Connect';
+  }
+  function setLanguage(value, persist = true) {
+    language = normalize(value);
+    if (persist) {
+      savedLanguage = language;
+      try { localStorage.setItem('cc-connect-language', language); } catch {}
+    }
+    apply();
+    return language;
+  }
+  return {
+    t, translate, apply, normalize, setLanguage,
+    getLanguage: () => language,
+    initialize: value => setLanguage(savedLanguage || value || navigator.language, false),
+    messages
+  };
+})();

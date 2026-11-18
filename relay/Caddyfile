@@ -1,0 +1,6 @@
+{$PAIR_DOMAIN} {
+    handle /pair {
+        reverse_proxy signal:8844
+    }
+    respond 404
+}
