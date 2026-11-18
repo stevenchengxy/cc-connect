@@ -49,12 +49,16 @@ async function selectedRoute(page) {
     const local = stats.get(pair.localCandidateId)
     const remote = stats.get(pair.remoteCandidateId)
     return {
+      policy:window.qaPeer.getConfiguration().iceTransportPolicy,
       path:[local.candidateType, remote.candidateType].includes('relay') ? 'relay' : 'direct',
       local:local.candidateType,
       remote:remote.candidateType,
-      protocol:local.relayProtocol || local.protocol
+      protocol:local.relayProtocol || local.protocol,
+      gathered:[...window.qaCandidates.local].sort(),
+      received:[...window.qaCandidates.remote].sort()
     }
   })
+  assert.equal(route.policy, requireRelay ? 'relay' : 'all')
   if (requireRelay) assert.equal(route.local, 'relay')
   return route
 }
