@@ -12,6 +12,9 @@ const profiles = {
   detail:   { width:2560, height:1440, fps:60, bitrate:22_000_000, label:'最高 1440p · 60 帧/秒' },
 };
 let info = {};
+let account = {status:'signedOut'};
+let registering = false;
+let accountBusy = false;
 let mode = 'viewer';
 let phase = 'idle';
 let generation = 0;
@@ -46,24 +49,100 @@ function setMode(next) {
   $('view-panel').hidden = mode !== 'viewer';
   $('host-panel').hidden = mode !== 'host';
 }
+function renderAccount() {
+  const approved = account.status === 'approved';
+  const login = account.status === 'signedOut';
+  $('account-panel').hidden = approved;
+  $('pairing-home').hidden = !approved;
+  $('account-logout').hidden = login;
+  $('account-logout').title = [account.username, t('退出账号')].filter(Boolean).join(' · ');
+  $('account-form').hidden = !login;
+  $('account-wait').hidden = login || approved;
+  $('account-title').textContent = t(login ? (registering ? '注册账号' : '登录账号')
+    : account.status === 'pending' ? '等待管理员批准。' : account.status === 'suspended' ? '账号已停用，请联系管理员。' : '账号暂不可用');
+  $('account-identity').textContent = account.username || '';
+  $('register-invite-wrap').hidden = !registering;
+  $('registration-help').hidden = !registering;
+  $('register-invite').required = registering;
+  $('account-password').autocomplete = registering ? 'new-password' : 'current-password';
+  $('account-password').minLength = registering ? 12 : 1;
+  $('account-submit').textContent = t(registering ? '注册' : '登录');
+  $('account-switch').textContent = t(registering ? '返回登录' : '使用邀请码注册');
+  for (const id of ['account-submit','account-switch','account-refresh']) $(id).disabled = accountBusy;
+  if (account.message) notice('account-notice',account.message,true);
+}
+
+function setAccount(next) {
+  if (!next || (next.revision || 0) < (account.revision || 0)) return;
+  const previous = account.status;
+  account = next;
+  if (account.status !== 'approved') {
+    info.iceServers = [];
+    $('invite-input').value = '';
+    if ($('settings-dialog').open) closeSettings();
+    if (phase !== 'idle') backHome('账号授权已结束。', true);
+  } else if (previous !== 'approved') {
+    Promise.resolve(api.info()).then(updateInfo).catch(() => {});
+  }
+  if (previous !== next.status) notice('account-notice');
+  renderAccount();
+  syncHome();
+}
+async function accountAction(action) {
+  if (accountBusy) return;
+  accountBusy = true;
+  notice('account-notice');
+  renderAccount();
+  try { setAccount(await action()); }
+  catch (error) { notice('account-notice', describeError(error), true); }
+  finally { accountBusy = false; renderAccount(); }
+}
+$('account-switch').onclick = () => {
+  registering = !registering;
+  $('account-password').value = '';
+  $('register-invite').value = '';
+  notice('account-notice'); renderAccount();
+};
+$('account-form').onsubmit = event => {
+  event.preventDefault();
+  void accountAction(async () => {
+    const values = {username:$('account-username').value.trim(), password:$('account-password').value};
+    if (registering) {
+      await api.register({...values, invite:$('register-invite').value.trim()});
+      registering = false;
+      $('register-invite').value = '';
+    }
+    $('account-password').value = '';
+    return api.login(values);
+  });
+};
+$('account-refresh').onclick = () => void accountAction(() => api.refreshAccount());
+$('account-logout').onclick = () => void accountAction(async () => {
+  $('account-password').value = ''; $('register-invite').value = '';
+  registering = false;
+  return api.logout();
+});
+
 function syncHome() {
   const idle = phase === 'idle';
+  const canPair = idle && account.status === 'approved';
   const inviting = phase === 'listening' || phase === 'request';
   $('view-tab').disabled = !idle && mode !== 'viewer';
   $('host-tab').disabled = !idle && mode !== 'host';
-  $('invite-input').disabled = !idle;
-  $('join-button').disabled = !idle;
-  $('host-button').disabled = !idle;
+  $('invite-input').disabled = !canPair;
+  $('join-button').disabled = !canPair;
+  $('host-button').disabled = !canPair;
   $('host-button').hidden = inviting;
   $('invite-box').hidden = !inviting;
   $('cancel-host').hidden = !inviting;
   $('waiting').hidden = phase !== 'joining';
-  $('settings-button').disabled = !idle;
+  $('settings-button').disabled = !canPair;
   $('update-button').disabled = !idle;
   $('language-select').disabled = !idle;
 }
 function updateInfo(data) {
   info = data;
+  setAccount(data.account);
   if (info.update?.phase) updateState = info.update;
   if (!localeInitialized) {
     i18n.initialize(info.language);
@@ -90,6 +169,7 @@ function cleanRoom() {
   clearInterval(previous.statsTimer);
   clearTimeout(previous.connectTimer);
   clearTimeout(previous.lossTimer);
+  clearTimeout(previous.grantTimer);
   if (previous.role === 'viewer') send(previous.channel, {kind:'reset'});
   previous.stream?.getTracks().forEach(track => track.stop());
   previous.pc.onconnectionstatechange = null;
@@ -145,7 +225,7 @@ for (const [id, next] of [['view-tab','viewer'],['host-tab','host']]) {
 $('join-form').onsubmit = async (event) => {
   event.preventDefault();
   const invite = $('invite-input').value.trim();
-  if (phase !== 'idle' || !invite) return;
+  if (phase !== 'idle' || account.status !== 'approved' || !invite) return;
   const token = ++generation;
   phase = 'joining';
   setStatus('正在配对', 'pending');
@@ -157,7 +237,7 @@ $('join-form').onsubmit = async (event) => {
   catch (e) { if (generation === token) await disconnect(describeError(e), true); }
 };
 $('host-button').onclick = async () => {
-  if (phase !== 'idle') return;
+  if (phase !== 'idle' || account.status !== 'approved') return;
   const token = ++generation;
   phase = 'opening';
   syncHome(); notice('home-notice'); setStatus('正在创建邀请', 'pending');
@@ -204,7 +284,6 @@ $('host-invite').onclick = (e) => e.target.select();
 
 $('settings-button').onclick = () => {
   if (phase !== 'idle') return;
-  $('relay-url').value = info.relayUrl || '';
   $('turn-url').value = info.turnUrl || '';
   $('turn-user').value = info.turnUsername || '';
   $('turn-password').value = '';
@@ -222,7 +301,7 @@ $('settings-form').onsubmit = async (event) => {
   $('save-settings').disabled = true;
   try {
     await api.settings({
-      relayUrl:$('relay-url').value.trim(), turnUrl:$('turn-url').value.trim(),
+      turnUrl:$('turn-url').value.trim(),
       turnUsername:$('turn-user').value.trim(), turnPassword:$('turn-password').value
     });
     updateInfo(await api.info());
@@ -422,6 +501,65 @@ function mediaFailureMessage(value) {
     ? '已完成公网配对，但画面连接失败。请检查 TURN 地址、凭据和网络可达性。'
     : '已完成公网配对，但两端无法直连，公共媒体中继尚未启用。请联系服务管理员。';
 }
+function scheduleGrant(value, expiresAt) {
+  clearTimeout(value.grantTimer);
+  if (!Number.isSafeInteger(expiresAt) || expiresAt <= Date.now()) return;
+  const remaining = expiresAt - Date.now();
+  value.grantExpiresAt = expiresAt;
+  value.grantTimer = setTimeout(() => {
+    void renewGrant(value).catch(() => terminate(value, '媒体中继授权已结束，请重新连接或联系管理员。'));
+  }, Math.max(1000, remaining - Math.min(30000, remaining / 4)));
+}
+
+async function publicRelayInUse(value) {
+  if (value.pc.connectionState !== 'connected') return true;
+  const report = await value.pc.getStats();
+  const transport = [...report.values()].find(stat => stat.type === 'transport' && stat.selectedCandidatePairId);
+  const pair = report.get(transport?.selectedCandidatePairId);
+  const local = report.get(pair?.localCandidateId);
+  if (!local) return true;
+  return local.candidateType === 'relay' && (!local.url || value.managedURLs.has(local.url));
+}
+
+async function restartIce(value) {
+  if (!isCurrent(value) || value.role !== 'host' || !value.pc.remoteDescription || value.pc.signalingState !== 'stable' ||
+      value.offering || Date.now() - (value.lastRestart || 0) < 4000) return;
+  value.offering = true;
+  value.lastRestart = Date.now();
+  try {
+    const offer = await value.pc.createOffer({iceRestart:true});
+    if (!isCurrent(value)) return;
+    await value.pc.setLocalDescription(offer);
+    if (isCurrent(value)) await api.signal({type:'offer', sdp:value.pc.localDescription.sdp});
+  } finally { value.offering = false; }
+}
+
+function renewGrant(value, answering = false) {
+  if (!isCurrent(value)) return;
+  if (value.renewing) return value.renewing;
+  value.renewing = (async () => {
+    const inUse = await publicRelayInUse(value);
+    if (!isCurrent(value)) return;
+    // A selected direct or custom route needs no further managed relay budget.
+    if (!inUse) {
+      value.pc.setConfiguration({...value.pc.getConfiguration(), iceServers:value.baseIce});
+      value.grantExpiresAt = 0;
+      return;
+    }
+    const {iceServers, expiresAt} = await api.renewIce();
+    if (!isCurrent(value)) return;
+    if (!iceServers?.length || expiresAt <= Date.now()) throw new Error('媒体中继授权已结束，请重新连接或联系管理员。');
+    const previous = value.grantExpiresAt;
+    value.pc.setConfiguration({...value.pc.getConfiguration(), iceServers:[...value.baseIce,...iceServers]});
+    value.managedURLs = new Set(iceServers.flatMap(server => [server.urls].flat()));
+    scheduleGrant(value,expiresAt);
+    if (expiresAt === previous || !value.pc.remoteDescription || answering) return;
+    if (value.role === 'host') await restartIce(value);
+    else await api.signal({type:'ice-restart'});
+  })().finally(() => { value.renewing = null; });
+  return value.renewing;
+}
+
 function startSession(event) {
   if (!['request','joining'].includes(phase)) return;
   clearInterval(expiryTimer); clearTimeout(joinTimer);
@@ -440,15 +578,16 @@ function startSession(event) {
   setStatus('正在连接','pending');
   const iceServers = [...(info.iceServers || [])];
   const managedServers = event.managedWan && Array.isArray(event.managedIceServers) ? event.managedIceServers : [];
-  if (event.managedWan) iceServers.push({urls:'stun:stun.cloudflare.com:3478'}, ...managedServers);
-  const pc = new RTCPeerConnection({iceServers});
+  if (event.managedWan) iceServers.push({urls:'stun:stun.cloudflare.com:3478'});
+  const pc = new RTCPeerConnection({iceServers:[...iceServers,...managedServers]});
   const value = room = {
-    pc, role:host ? 'host' : 'viewer', allowControl:host && event.allowControl === true,
+    pc, baseIce:iceServers, managedURLs:new Set(managedServers.flatMap(server => [server.urls].flat())), role:host ? 'host' : 'viewer', allowControl:host && event.allowControl === true,
     profile:'balanced', managedWan:event.managedWan === true,
     managedIceUnavailable:event.managedIceUnavailable === true,
     managedTurn:managedServers.some(server => [server.urls].flat().some(url => /^turns?:/i.test(url))),
     candidates:[], signaling:Promise.resolve(), adjusting:false
   };
+  scheduleGrant(value,event.managedIceExpiresAt);
   showPermission(value);
   pc.onicecandidate = (e) => {
     if (isCurrent(value) && e.candidate) Promise.resolve(api.signal({type:'candidate',candidate:e.candidate.toJSON()}))
@@ -509,15 +648,28 @@ $('resume-capture').onclick = () => { if (room?.role === 'host') void capture(ro
 async function receiveSignal(value, payload) {
   if (!isCurrent(value) || !payload) return;
   const pc = value.pc;
+  const matchesRemote = candidate => pc.remoteDescription && (!candidate?.usernameFragment ||
+    pc.remoteDescription.sdp.split(/\r?\n/).includes('a=ice-ufrag:' + candidate.usernameFragment));
   if (payload.type === 'candidate') {
-    if (pc.remoteDescription) await pc.addIceCandidate(payload.candidate);
+    if (matchesRemote(payload.candidate)) await pc.addIceCandidate(payload.candidate);
     else if (value.candidates.length < 128) value.candidates.push(payload.candidate);
     return;
   }
-  if (pc.remoteDescription) return;
+  if (payload.type === 'ice-restart') {
+    if (value.role === 'host') await restartIce(value);
+    return;
+  }
+  if ((payload.type === 'offer' && pc.signalingState !== 'stable') ||
+      (payload.type === 'answer' && pc.signalingState !== 'have-local-offer')) return;
   if ((value.role === 'viewer' && payload.type !== 'offer') || (value.role === 'host' && payload.type !== 'answer')) return;
+  if (value.role === 'viewer' && pc.remoteDescription && value.grantExpiresAt && value.grantExpiresAt - Date.now() <= 35000) {
+    await renewGrant(value, true);
+    if (!isCurrent(value)) return;
+  }
   await pc.setRemoteDescription({type:payload.type,sdp:payload.sdp});
-  for (const candidate of value.candidates.splice(0)) { if (isCurrent(value)) await pc.addIceCandidate(candidate); }
+  for (const candidate of value.candidates.splice(0)) {
+    if (isCurrent(value) && matchesRemote(candidate)) await pc.addIceCandidate(candidate);
+  }
   if (!isCurrent(value)) return;
   if (value.role === 'viewer') {
     await pc.setLocalDescription(await pc.createAnswer());
@@ -617,6 +769,7 @@ window.addEventListener('pagehide',() => { resetInput(); cleanRoom(); });
 
 async function handleEvent(event) {
   switch (event.type) {
+    case 'account': setAccount(event.account); break;
     case 'update':
       updateState = event.state || { phase: 'idle' };
       renderUpdate();
@@ -702,6 +855,7 @@ $('update-action').onclick = () => { void performUpdateAction(); };
 
 function refreshLanguage() {
   i18n.apply();
+  renderAccount();
   $('language-select').value = i18n.getLanguage();
   window.ccSelects?.refresh();
   renderUpdate();
@@ -720,6 +874,7 @@ i18n.apply();
 $('language-select').value = i18n.getLanguage();
 setStatus('待连接');
 setMode('viewer');
+renderAccount();
 setQuality(quality);
 syncHome();
 if (api) {

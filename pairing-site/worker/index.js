@@ -1,3 +1,6 @@
+import { accessError, accountRoutes, authenticate, fingerprint } from './auth.js';
+import { closeRoomRelay, managedIce, inspectRelayIfDue } from './usage.js';
+
 // Only invitation-key holders can complete the endpoint-to-endpoint challenge.
 // This service routes their opaque signaling packets and never receives the key.
 const WAIT_MS = 10 * 60_000;
@@ -15,13 +18,16 @@ function reply(status, body = null) {
   return new Response(body, { status, headers: body ? { ...headers, 'content-type': 'application/octet-stream' } : headers });
 }
 
-async function fingerprint(value) {
-  const bytes = typeof value === 'string' ? new TextEncoder().encode(value) : value;
-  const hash = await crypto.subtle.digest('SHA-256', bytes);
-  return Array.from(new Uint8Array(hash), n => n.toString(16).padStart(2, '0')).join('');
-}
+// Caller and both role owners must still have a current, approved login.
+// Checking this inside the SQL mutation also covers logout during a slow PUT.
+const liveSession = (account,session) => `EXISTS(SELECT 1 FROM account_sessions s
+  JOIN accounts a ON a.id=s.account WHERE s.digest=${session} AND s.account=${account}
+  AND s.expires>(julianday('now')-2440587.5)*86400000 AND a.status='approved')`;
+const membersLive = liveSession('r.host_account','r.host_session') +
+  ' AND (r.viewer IS NULL OR '+liveSession('r.viewer_account','r.viewer_session')+')';
+const membership = role => `r.${role}=? AND r.${role}_account=? AND r.${role}_session=? AND ${membersLive}`;
 
-async function register(db, request, id, role, token, now) {
+async function register(db, request, id, role, token, now, actor) {
   const proof = request.headers.get('x-viewer-proof') || '';
   if (role === 'host') {
     if (!HEX_DIGEST.test(proof)) return reply(400);
@@ -29,26 +35,28 @@ async function register(db, request, id, role, token, now) {
     const source = await fingerprint(`${Math.floor(now / 86400000)}|${request.headers.get('cf-connecting-ip') || 'local'}`);
     const [, created] = await db.batch([
       db.prepare('DELETE FROM rooms WHERE id IN (SELECT id FROM rooms WHERE expires <= ? ORDER BY expires LIMIT 8)').bind(now),
-      db.prepare(`INSERT OR IGNORE INTO rooms(id,host,enrollment,source,created,expires)
-        SELECT ?,?,?,?,?,? WHERE (SELECT count(*) FROM rooms WHERE closed=0 AND expires>?) < 256
+      db.prepare(`INSERT OR IGNORE INTO rooms(id,host,enrollment,source,created,expires,host_account,host_session)
+        SELECT ?,?,?,?,?,?,?,? WHERE ${liveSession('?','?')} AND (SELECT count(*) FROM rooms WHERE closed=0 AND expires>?) < 256
         AND (SELECT count(*) FROM rooms WHERE source=? AND created>?) < 12`)
-        .bind(id, token, proof, source, now, now + WAIT_MS, now, source, now - 60_000)
+        .bind(id, token, proof, source, now, now + WAIT_MS, actor.id, actor.digest, actor.digest, actor.id, now, source, now - 60_000)
     ]);
     if (created.meta.changes > 0) return reply(201);
-    const room = await db.prepare('SELECT host,enrollment,closed,expires FROM rooms WHERE id=?').bind(id).first();
+    const room = await db.prepare(`SELECT host,host_account,host_session,enrollment,closed,expires,
+      (${membersLive}) AS live FROM rooms r WHERE id=?`).bind(id).first();
     if (!room) return reply(429);
-    if (room.closed || room.expires <= now) return reply(410);
-    return reply(room.host === token && room.enrollment === proof ? 200 : 409);
+    if (room.closed || room.expires <= now || !room.live) return reply(410);
+    return reply(room.host === token && room.host_account === actor.id && room.host_session === actor.digest && room.enrollment === proof ? 200 : 409);
   }
   if (!TOKEN.test(proof)) return reply(400);
   const enrollment = await fingerprint(proof);
-  const room = await db.prepare('SELECT enrollment,viewer,closed,expires FROM rooms WHERE id=?').bind(id).first();
+  const room = await db.prepare(`SELECT enrollment,viewer,viewer_account,viewer_session,closed,expires FROM rooms r WHERE id=? AND ${membersLive}`).bind(id).first();
   if (!room) return reply(404);
   if (room.enrollment !== enrollment) return reply(403);
   if (room.closed || room.expires <= now) return reply(410);
-  if (room.viewer) return reply(room.viewer === token ? 200 : 409);
-  const result = await db.prepare(`UPDATE rooms SET viewer=?, expires=? WHERE id=? AND enrollment=?
-      AND viewer IS NULL AND closed=0 AND expires>?`).bind(token, now + SESSION_MS, id, enrollment, now).run();
+  if (room.viewer) return reply(room.viewer === token && room.viewer_account === actor.id && room.viewer_session === actor.digest ? 200 : 409);
+  const result = await db.prepare(`UPDATE rooms AS r SET viewer=?, expires=?, viewer_account=?, viewer_session=? WHERE id=? AND enrollment=?
+      AND viewer IS NULL AND closed=0 AND expires>? AND ${membersLive} AND ${liveSession('?','?')}`)
+    .bind(token, now + SESSION_MS, actor.id, actor.digest, id, enrollment, now, actor.digest, actor.id).run();
   return reply(result.meta.changes ? 201 : 409);
 }
 
@@ -73,128 +81,45 @@ async function boundedBytes(request, limit, minimum) {
   return bytes;
 }
 
-async function receive(db, id, role, token, seq, now) {
+async function receive(env, ctx, id, role, token, seq, now, actor) {
   const sender = role === 'host' ? 'viewer' : 'host';
   // The role is limited to a fixed enum by PATH. One indexed read per idle poll.
-  const row = await db.prepare(`SELECT r.${role} AS auth,r.closed,r.expires,m.bytes FROM rooms r
-    LEFT JOIN messages m ON m.room=r.id AND m.sender=? AND m.seq=? WHERE r.id=? AND r.${role}=?`)
-    .bind(sender, seq, id, token).first();
+  const row = await env.DB.prepare(`SELECT r.${role} AS auth,r.closed,r.expires,m.bytes,inspection.expires AS next_check FROM rooms r
+    LEFT JOIN messages m ON m.room=r.id AND m.sender=? AND m.seq=?
+    LEFT JOIN auth_rate inspection ON inspection.bucket='relay-inspection' WHERE r.id=? AND ${membership(role)}`)
+    .bind(sender, seq, id, token, actor.id, actor.digest).first();
   if (!row || row.expires <= now) return reply(410);
+  if (ctx && !row.closed && (row.next_check ?? 0)<=now) ctx.waitUntil(inspectRelayIfDue(env));
   if (row.bytes != null) return reply(200, new Uint8Array(row.bytes));
   return reply(row.closed ? 410 : 204);
 }
 
-async function submit(db, request, id, role, token, seq, now) {
+async function submit(db, request, id, role, token, seq, now, actor) {
   if (request.headers.get('content-type')?.split(';')[0].toLowerCase() !== 'application/octet-stream') return reply(415);
-  const room = await db.prepare(`SELECT closed,expires FROM rooms WHERE id=? AND ${role}=?`).bind(id, token).first();
+  const room = await db.prepare(`SELECT closed,expires FROM rooms r WHERE id=? AND ${membership(role)}`).bind(id, token, actor.id, actor.digest).first();
   if (!room || room.closed || room.expires <= now) return reply(410);
   const bytes = await boundedBytes(request, MAX_PACKET, 50);
   if (!bytes) return reply(413);
   const digest = await fingerprint(bytes);
   // The INSERT atomically enforces ordering, total bytes and the room lifetime.
   const result = await db.prepare(`INSERT OR IGNORE INTO messages(room,sender,seq,bytes,size,digest)
-    SELECT ?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM rooms WHERE id=? AND ${role}=? AND expires>? AND closed=0 AND viewer IS NOT NULL)
+    SELECT ?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM rooms r WHERE id=? AND ${membership(role)} AND expires>? AND closed=0 AND viewer IS NOT NULL)
     AND ?=(SELECT coalesce(max(seq),0)+1 FROM messages WHERE room=? AND sender=?)
     AND ?+(SELECT coalesce(sum(size),0) FROM messages WHERE room=? AND sender=?)<=?`)
-    .bind(id, role, seq, bytes.buffer, bytes.length, digest, id, token, Date.now(), seq, id, role, bytes.length, id, role, MAX_DIRECTION_BYTES).run();
+    .bind(id, role, seq, bytes.buffer, bytes.length, digest, id, token, actor.id, actor.digest, Date.now(), seq, id, role, bytes.length, id, role, MAX_DIRECTION_BYTES).run();
   if (result.meta.changes > 0) return reply(204);
   const old = await db.prepare('SELECT digest FROM messages WHERE room=? AND sender=? AND seq=?').bind(id, role, seq).first();
   return reply(old?.digest === digest ? 204 : 409);
 }
 
-function turnURLs(value) {
-  const urls = JSON.parse(value);
-  if (!Array.isArray(urls) || !urls.length || urls.length > 8) throw Error('Invalid TURN configuration');
-  for (const url of urls) {
-    if (typeof url !== 'string' || url.length > 512) throw Error('Invalid TURN URL');
-    const match = /^(turns?):(\[[a-fA-F0-9:]+\]|[a-zA-Z0-9.-]+)(?::([1-9]\d{0,4}))?(?:\?transport=(udp|tcp))?$/.exec(url);
-    if (!match || Number(match[3]) > 65535 || (match[1] === 'turns' && match[4] === 'udp')) throw Error('Invalid TURN URL');
-    // The URL parser also validates IPv4/IPv6 literals and hostname syntax.
-    new URL('https://' + match[2]);
-  }
-  return urls;
-}
-
-const cloudflareUrls = new Set([
-  'turn:turn.cloudflare.com:3478?transport=udp', 'turn:turn.cloudflare.com:443?transport=udp',
-  'turn:turn.cloudflare.com:3478?transport=tcp', 'turn:turn.cloudflare.com:80?transport=tcp',
-  'turns:turn.cloudflare.com:5349?transport=tcp', 'turns:turn.cloudflare.com:443?transport=tcp'
-]);
-
-async function requestCloudflareGrant(env, ttl) {
-  // Fixed origin, strict key id and redirect policy keep the operator token on the provider's API.
-  const endpoint = 'https://rtc.live.cloudflare.com/v1/turn/keys/' + env.CC_CF_TURN_KEY_ID + '/credentials/generate-ice-servers';
-  const response = await fetch(endpoint, {
-    method: 'POST', redirect: 'error', signal: AbortSignal.timeout(4000),
-    headers: { authorization: 'Bearer ' + env.CC_CF_TURN_API_TOKEN, 'content-type': 'application/json' },
-    body: JSON.stringify({ ttl })
-  });
-  if (response.status !== 201) throw Error('Provider unavailable');
-  const bytes = await boundedBytes(response, 16 * 1024, 1);
-  if (!bytes) throw Error('Invalid provider response');
-  const payload = JSON.parse(new TextDecoder().decode(bytes));
-  if (!Array.isArray(payload.iceServers) || payload.iceServers.length > 8) throw Error('Invalid provider response');
-  for (const server of payload.iceServers) {
-    if (!Array.isArray(server?.urls) || typeof server.username !== 'string' || typeof server.credential !== 'string') continue;
-    if (!/^[!-~]{1,512}$/.test(server.username) || !/^[!-~]{1,512}$/.test(server.credential)) continue;
-    const urls = [...new Set(server.urls.filter(url => cloudflareUrls.has(url)))];
-    if (urls.length) return [{ urls, username: server.username, credential: server.credential }];
-  }
-  throw Error('No supported TURN endpoint');
-}
-
-async function cloudflareCredentials(env, id, role, token, now, roomExpiry) {
-  if (!/^[a-fA-F0-9-]{32,36}$/.test(env.CC_CF_TURN_KEY_ID || '') ||
-      !/^[!-~]{16,2048}$/.test(env.CC_CF_TURN_API_TOKEN || '')) return reply(503);
-  const cache = await env.DB.prepare('SELECT retry_at,expires,payload FROM turn_grants WHERE room=? AND role=?')
-    .bind(id,role).first();
-  if (cache?.payload && cache.expires > now) return Response.json(JSON.parse(cache.payload), {headers});
-  if (cache?.retry_at > now) return reply(503);
-  const lease = crypto.randomUUID();
-  // A single atomic lease per role also caps retries after a provider outage.
-  const claimed = await env.DB.prepare(`INSERT INTO turn_grants(room,role,lease,retry_at) VALUES(?,?,?,?)
-    ON CONFLICT(room,role) DO UPDATE SET lease=excluded.lease,retry_at=excluded.retry_at,expires=0,payload=NULL
-    WHERE retry_at<=? AND expires<=?`).bind(id, role, lease, now+60_000, now, now).run();
-  if (!claimed.meta.changes) return reply(503);
-  const ttl = Math.min(3600, Math.floor((roomExpiry - now) / 1000));
-  if (ttl < 1) return reply(403);
-  const iceServers = await requestCloudflareGrant(env, ttl);
-  const result = {iceServers, expiresAt: now + ttl * 1000};
-  const stored = await env.DB.prepare(`UPDATE turn_grants SET expires=?,payload=? WHERE room=? AND role=? AND lease=?
-    AND EXISTS(SELECT 1 FROM rooms WHERE id=? AND ${role}=? AND closed=0 AND viewer IS NOT NULL AND expires>?)`)
-    .bind(result.expiresAt, JSON.stringify(result), id, role, lease, id, token, Date.now()).run();
-  return stored.meta.changes ? Response.json(result, {headers}) : reply(403);
-}
-
-async function iceCredentials(env, id, role, token, now) {
-  const room = await env.DB.prepare(`SELECT expires FROM rooms WHERE id=? AND ${role}=? AND viewer IS NOT NULL AND closed=0 AND expires>?`)
-    .bind(id, token, now).first();
-  if (!room) return reply(403);
-  if (env.CC_CF_TURN_KEY_ID || env.CC_CF_TURN_API_TOKEN) {
-    if (env.CC_TURN_URLS || env.CC_TURN_SECRET) return reply(503);
-    return cloudflareCredentials(env, id, role, token, now, room.expires);
-  }
-  if (!env.CC_TURN_URLS && !env.CC_TURN_SECRET) return reply(204);
-  if (typeof env.CC_TURN_SECRET !== 'string' || env.CC_TURN_SECRET.length < 32) return reply(503);
-  const urls = turnURLs(env.CC_TURN_URLS);
-  // Align credentials to half-hour intervals so repeated requests do not mint new
-  // usernames that defeat coturn's per-user allocation quota.
-  const window = 30 * 60_000;
-  const expiry = Math.floor(Math.min(room.expires, Math.floor(now / window) * window + 2 * window) / 1000);
-  const username = expiry + ':cc-' + id.slice(0, 20) + '-' + role;
-  const utf8 = new TextEncoder();
-  const key = await crypto.subtle.importKey('raw', utf8.encode(env.CC_TURN_SECRET), {name:'HMAC', hash:'SHA-1'}, false, ['sign']);
-  const signature = new Uint8Array(await crypto.subtle.sign('HMAC', key, utf8.encode(username)));
-  const credential = btoa(String.fromCharCode(...signature));
-  return Response.json({ iceServers: [{ urls, username, credential }], expiresAt: expiry * 1000 }, { headers });
-}
-
-async function handle(request, env) {
+async function handle(request, env, ctx) {
   const url = new URL(request.url);
   if (request.method === 'GET' && url.pathname === '/health') {
-    await env.DB.prepare('SELECT 1 FROM rooms LIMIT 1').first();
+    await env.DB.prepare('SELECT singleton FROM admin_setup LIMIT 1').first();
     return Response.json({ service: 'cc-connect-pair', protocol: 1 }, { headers });
   }
+  const accountResponse = await accountRoutes(request,env);
+  if (accountResponse) return accountResponse;
   const match = PATH.exec(url.pathname);
   if (!match || url.search) return reply(404);
   const [, id, role, sequence, ice] = match;
@@ -202,24 +127,37 @@ async function handle(request, env) {
   if (!auth) return reply(401);
   const token = await fingerprint(auth[1]);
   const now = Date.now();
-  if (ice) return request.method === 'GET' ? iceCredentials(env, id, role, token, now) : reply(405);
+  const actor = await authenticate(env.DB,request.headers.get('x-cc-session'),now);
+  const denied = accessError(actor);
+  if (denied) return denied;
+  if (ice) {
+    if (request.method !== 'GET') return reply(405);
+    const room = await env.DB.prepare(`SELECT expires FROM rooms r WHERE id=? AND ${membership(role)}
+      AND viewer IS NOT NULL AND closed=0 AND expires>?`).bind(id,token,actor.id,actor.digest,now).first();
+    if (!room) return reply(403);
+    return managedIce(env,{accountId:actor.id,roomId:id,role,roomExpiresAt:room.expires});
+  }
   if (!sequence) {
-    if (request.method === 'POST') return register(env.DB, request, id, role, token, now);
+    if (request.method === 'POST') return register(env.DB, request, id, role, token, now, actor);
     if (request.method !== 'DELETE') return reply(405);
-    await env.DB.prepare(`UPDATE rooms SET closed=1,expires=min(expires,?) WHERE id=? AND ${role}=? AND closed=0`)
-      .bind(now + DRAIN_MS, id, token).run();
+    const result = await env.DB.prepare(`UPDATE rooms AS r SET closed=1,expires=min(expires,?) WHERE id=? AND ${membership(role)} AND closed=0`)
+      .bind(now + DRAIN_MS, id, token, actor.id, actor.digest).run();
+    if (result.meta.changes) await closeRoomRelay(env,id);
     return reply(204);
   }
   const seq = Number(sequence);
   if (seq > MAX_SEQ) return reply(429);
-  if (request.method === 'GET') return receive(env.DB, id, role, token, seq, now);
-  if (request.method === 'PUT') return submit(env.DB, request, id, role, token, seq, now);
+  if (request.method === 'GET') return receive(env, ctx, id, role, token, seq, now, actor);
+  if (request.method === 'PUT') return submit(env.DB, request, id, role, token, seq, now, actor);
   return reply(405);
 }
 
 export default {
-  async fetch(request, env) {
-    try { return await handle(request, env); }
+  scheduled(controller,env,ctx) {
+    ctx.waitUntil(inspectRelayIfDue(env));
+  },
+  async fetch(request, env, ctx) {
+    try { return await handle(request, env, ctx); }
     catch { return reply(503); }
   }
 };

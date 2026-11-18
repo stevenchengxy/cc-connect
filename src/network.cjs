@@ -9,6 +9,7 @@ const { isIP } = require('node:net');
 const WebSocket = require('ws');
 const forge = require('node-forge');
 const { Mailbox } = require('./managed-mailbox.cjs');
+const { validToken, messages } = require('./account.cjs');
 
 const INVITE_PREFIX = 'RD1.';
 const LIFETIME = 10 * 60 * 1000;
@@ -88,6 +89,7 @@ async function certificate() {
 
 function isSignal(x) {
   if (!x || typeof x !== 'object') return false;
+  if (x.type === 'ice-restart') return Object.keys(x).length === 1;
   if (x.type === 'offer' || x.type === 'answer') return typeof x.sdp === 'string' && x.sdp.length <= 128 * 1024;
   if (x.type !== 'candidate') return false;
   return x.candidate === null || (typeof x.candidate === 'object' && x.candidate && typeof x.candidate.candidate === 'string' &&
@@ -192,14 +194,17 @@ function listen(server, port, host) {
 class PairingNetwork extends EventEmitter {
   state = null;
 
-  constructor({ managedUrl, fetchImpl = globalThis.fetch } = {}) {
+  constructor({ managedUrl, fetchImpl = globalThis.fetch, accountOnly = false, accountToken } = {}) {
     super();
     this.managedUrl = managedUrl;
     this.fetchImpl = fetchImpl;
+    this.accountOnly = accountOnly;
+    this.accountToken = accountToken;
+    if (accountOnly && (!managedUrl || !validToken(accountToken))) throw new Error(messages.account_required);
   }
 
   async mailbox(s) {
-    const mailbox = new Mailbox(this.managedUrl, s.role, s.secret, this.fetchImpl);
+    const mailbox = new Mailbox(this.managedUrl, s.role, s.secret, this.fetchImpl, this.accountToken);
     s.sockets.add(mailbox);
     try {
       await mailbox.register();
@@ -227,7 +232,13 @@ class PairingNetwork extends EventEmitter {
     const spec = { key: b64(crypto.randomBytes(32)), exp: Date.now() + LIFETIME };
     const s = this.begin('host', name, Buffer.from(spec.key, 'base64url'));
     try {
-      if (relayUrl) {
+      if (this.accountOnly) {
+        spec.account = 1;
+        spec.managed = 1;
+        const socket = await this.mailbox(s);
+        this.live(s);
+        this.attach(s, socket, true);
+      } else if (relayUrl) {
         spec.relay = relayURL(relayUrl);
         const ws = await dial(s, rendezvous(spec, 'host'));
         this.live(s);
@@ -285,13 +296,17 @@ class PairingNetwork extends EventEmitter {
 
   async join({ invite, name, relayUrl } = {}) {
     const spec = invitation(invite);
+    if (this.accountOnly && (spec.account !== 1 || spec.managed !== 1 || spec.relay || spec.ips)) {
+      throw new Error('请将两端升级至 0.4.0 或更高版本，并重新生成配对码。');
+    }
     if (spec.relay && (!relayUrl || relayURL(relayUrl) !== spec.relay)) {
       throw new Error('这是一份跨网邀请。请先在两端配置相同且受信任的 wss:// 信令地址。');
     }
     const s = this.begin('viewer', name, Buffer.from(spec.key, 'base64url'));
     try {
       let ws;
-      if (spec.relay) ws = await dial(s, rendezvous(spec, 'viewer'));
+      if (this.accountOnly) ws = await this.mailbox(s);
+      else if (spec.relay) ws = await dial(s, rendezvous(spec, 'viewer'));
       else {
         const managed = spec.managed === 1 && this.managedUrl && !relayUrl;
         if (spec.ips) {
@@ -338,7 +353,7 @@ class PairingNetwork extends EventEmitter {
       clearInterval(heartbeat);
       clearTimeout(p.timeout);
       s.sockets.delete(ws);
-      if (this.state === s && required()) this.end(s, '对端已断开，连接已结束。');
+      if (this.state === s && required()) this.end(s, ws.accountError || '对端已断开，连接已结束。');
     });
     ws.on('message', (data, binary) => {
       if (this.state !== s) return;
@@ -406,14 +421,19 @@ class PairingNetwork extends EventEmitter {
     this.emit('event', { type: 'connected', role: s.role, name: p.name, managedWan: p.managedWan });
   }
 
-  async getManagedIceServers() {
+  async getManagedIceServers(renew = false) {
     const peer = this.state?.peer;
     if (peer?.phase !== 'active' || !peer.managedWan) return [];
     // One short-lived grant per approved endpoint, scoped to this session.
+    if (renew && peer.ws.iceExpiresAt && peer.ws.iceExpiresAt - Date.now() <= 35000) peer.iceGrant = null;
     peer.iceGrant ??= peer.ws.ice();
     const servers = await peer.iceGrant;
     if (peer.ws.iceUnavailable) peer.iceGrant = null;
     return this.state?.peer === peer ? servers : [];
+  }
+
+  get managedIceExpiresAt() {
+    return this.state?.peer?.ws?.iceExpiresAt || 0;
   }
 
   get managedIceUnavailable() {

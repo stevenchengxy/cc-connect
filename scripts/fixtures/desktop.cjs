@@ -1,9 +1,36 @@
 // A visible test window supplies an animated synthetic source. Always replace
 // the capture target here so the integration test never reads the user's desktop.
-const { app, BrowserWindow, desktopCapturer, session, screen, systemPreferences } = require('electron')
+const { app, BrowserWindow, desktopCapturer, session, screen, systemPreferences, safeStorage } = require('electron')
 const path = require('node:path')
 app.whenReady().then(async () => {
   const ses = session.defaultSession
+  const fixture = process.env.CC_QA_ACCOUNT_ORIGIN
+  if (fixture) {
+    const origin = new URL(fixture)
+    if (origin.protocol !== 'http:' || origin.hostname !== '127.0.0.1') throw new Error('Invalid fixture origin')
+    const fetch = ses.fetch.bind(ses)
+    ses.fetch = (url, init) => {
+      const target = new URL(url)
+      if (target.origin === 'https://cc-connect-pair.stevenchengxy19.chatgpt.site') return fetch(origin.origin + target.pathname, init)
+      return fetch(url, init)
+    }
+    // Exercise the app's encrypted-file&IPC paths without modifying the operator's real keychain.
+    const { randomBytes, createCipheriv, createDecipheriv } = require('node:crypto')
+    const key = randomBytes(32)
+    safeStorage.isAsyncEncryptionAvailable = async () => true
+    if (process.platform === 'linux') safeStorage.getSelectedStorageBackend = () => 'gnome_libsecret'
+    safeStorage.encryptStringAsync = async text => {
+      const iv = randomBytes(12)
+      const cipher = createCipheriv('aes-256-gcm',key,iv)
+      const ciphertext = Buffer.concat([cipher.update(text),cipher.final()])
+      return Buffer.concat([iv,cipher.getAuthTag(),ciphertext])
+    }
+    safeStorage.decryptStringAsync = async buffer => {
+      const decipher = createDecipheriv('aes-256-gcm',key,buffer.subarray(0,12))
+      decipher.setAuthTag(buffer.subarray(12,28))
+      return {result:Buffer.concat([decipher.update(buffer.subarray(28)),decipher.final()]).toString()}
+    }
+  }
   const setHandler = ses.setDisplayMediaRequestHandler.bind(ses)
   let source
   ses.setDisplayMediaRequestHandler = handler => setHandler((request, reply) => {
@@ -12,6 +39,9 @@ app.whenReady().then(async () => {
       reply({ video: source.webContents.mainFrame })
     })
   })
+  const syntheticDisplay = {...screen.getPrimaryDisplay(), id:900001, label:'Synthetic QA screen'}
+  screen.getPrimaryDisplay = () => syntheticDisplay
+  screen.getAllDisplays = () => [syntheticDisplay]
   desktopCapturer.getSources = async () => [{ name: '测试屏幕', id: 'screen:synthetic', display_id: String(screen.getPrimaryDisplay().id) }]
   systemPreferences.getMediaAccessStatus = () => 'granted'
   if (process.argv.includes('--synthetic-source')) {

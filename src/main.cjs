@@ -8,6 +8,7 @@ const { pathToFileURL } = require('node:url')
 const { PairingNetwork } = require('./network.cjs')
 const { InputBridge } = require('../native/bridge.cjs')
 const { Settings } = require('./settings.cjs')
+const { DesktopAccount, messages } = require('./account.cjs')
 const { Updater } = require('./updater.cjs')
 const { systemUpdateTransport } = require('./update-transport.cjs')
 
@@ -31,6 +32,7 @@ function nativeText(zh, tw, en) {
 }
 let window
 let preferences
+let account
 let current
 let tray
 let saveInProgress = false
@@ -107,14 +109,15 @@ function showSharingIndicator() {
   ]))
 }
 
-function createSession(role) {
+function createSession(role, token) {
+  if (!token || account.approvedToken !== token) throw new Error(messages.account_required)
   if (installingUpdate) throw new Error('更新任务正在进行，请稍候。')
   if (current || saveInProgress) throw new Error('请先结束当前配对，或等待网络设置保存完成。')
   const network = new PairingNetwork({
-    managedUrl: !app.isPackaged && app.commandLine.hasSwitch('test-local-pairing') ? undefined : managedUrl,
+    managedUrl, accountOnly: true, accountToken: token,
     fetchImpl: (url, init) => session.defaultSession.fetch(url, { ...init, credentials: 'omit' })
   })
-  const active = { network, role, phase: 'pairing', allowControl: false }
+  const active = { network, role, token, phase: 'pairing', allowControl: false }
   current = active
   active.network.on('event', event => {
     if (current !== active) return
@@ -134,7 +137,7 @@ function createSession(role) {
           active.pendingSignals = []
           active.network.getManagedIceServers().then(iceServers => {
             if (current !== active) return
-            send({ type: 'accepted', role, name: event.name, allowControl: active.allowControl, managedWan: true, managedIceServers: iceServers, managedIceUnavailable: active.network.managedIceUnavailable })
+            send({ type: 'accepted', role, name: event.name, allowControl: active.allowControl, managedWan: true, managedIceServers: iceServers, managedIceExpiresAt: active.network.managedIceExpiresAt, managedIceUnavailable: active.network.managedIceUnavailable })
             for (const signal of active.pendingSignals) send({ type: 'signal', signal })
             active.pendingSignals = null
           }).catch(() => { if (current === active) finish('公网连接初始化失败，请重新配对。') })
@@ -151,6 +154,7 @@ function createSession(role) {
         break
       case 'closed':
         finish(event.reason || '对方已断开连接')
+        void account.refresh().catch(() => {})
         break
     }
   })
@@ -198,10 +202,23 @@ function registerHandlers() {
     updateApplicationMenu()
     if (tray) { tray.destroy(); tray = null; showSharingIndicator() }
   })
-  handle('info', async () => ({
-    name: deviceName, platform: process.platform, version: app.getVersion(), inputSupported, language, update: updater.getState(),
-    ...await preferences.getPublic()
-  }))
+  handle('info', async () => {
+    const token = account.approvedToken
+    const config = token ? await preferences.getPublic() : null
+    return {name:deviceName, platform:process.platform, version:app.getVersion(), inputSupported, language,
+      update:updater.getState(), ...(token && token === account.approvedToken ? config : {}), account:account.state}
+  })
+  handle('account-login', values => account.login(values))
+  handle('account-register', values => account.register(values))
+  handle('account-refresh', () => account.refresh())
+  handle('account-logout', () => account.logout())
+  handle('renew-ice', async () => {
+    const active = current
+    if (!active || active.phase !== 'connected' || active.token !== account.approvedToken) throw new Error(messages.account_required)
+    const iceServers = await active.network.getManagedIceServers(true)
+    if (current !== active || active.token !== account.approvedToken) throw new Error('连接已结束。')
+    return {iceServers, expiresAt:active.network.managedIceExpiresAt, unavailable:active.network.managedIceUnavailable}
+  })
   handle('check-update', () => updater.check())
   handle('download-update', () => updater.download())
   handle('install-update', async () => {
@@ -215,14 +232,16 @@ function registerHandlers() {
     } catch (error) { installingUpdate = false; throw error }
   })
   handle('settings', async values => {
+    await account.requireApproved()
     if (current || saveInProgress) throw new Error('请先结束当前配对，再修改网络设置。')
     saveInProgress = true
-    try { await preferences.update(values) } finally { saveInProgress = false }
+    try { await preferences.update({...values, relayUrl:''}) } finally { saveInProgress = false }
   })
   for (const role of ['host', 'viewer']) {
     handle(role === 'host' ? 'host' : 'join', async invite => {
-      const active = createSession(role)
-      const options = { name: deviceName, relayUrl: preferences.value.relayUrl }
+      const token = await account.requireApproved()
+      const active = createSession(role, token)
+      const options = { name: deviceName }
       try {
         return role === 'host'
           ? await active.network.host(options)
@@ -248,6 +267,7 @@ function registerHandlers() {
     const active = requirePending()
     active.phase = 'approving'
     try {
+      if (await account.requireApproved() !== active.token || current !== active) throw new Error('连接请求已失效。')
       const sources = await listScreens()
       if (current !== active) throw new Error('连接请求已失效。')
       active.source = sources.find(item => item.id === screenId)
@@ -285,12 +305,12 @@ function registerHandlers() {
     if (current === active) finish('已拒绝请求')
   })
   handle('signal', payload => {
-    if (current?.phase !== 'connected') throw new Error('连接已结束。')
+    if (current?.phase !== 'connected' || current.token !== account.approvedToken) throw new Error('连接已结束。')
     current.network.signal(payload)
   })
   ipcMain.on('jianping:input', (event, data) => {
     if (!trusted(event.senderFrame) || current?.role !== 'host' ||
-        current.phase !== 'connected' || !current.allowControl || !current.captureGranted) return
+        current.phase !== 'connected' || current.token !== account.approvedToken || !current.allowControl || !current.captureGranted) return
     try { current.input.send(data) } catch (err) { disableInput(current, err.message) }
   })
   handle('disconnect', () => finish('本机已断开连接'))
@@ -302,7 +322,7 @@ function registerHandlers() {
 
 function configurePermissions() {
   const ses = session.defaultSession
-  const sharing = () => current?.role === 'host' && current.phase === 'connected' && Boolean(current.source)
+  const sharing = () => current?.role === 'host' && current.token === account.approvedToken && current.phase === 'connected' && Boolean(current.source)
   ses.setPermissionCheckHandler((contents, permission, origin) =>
     contents === window?.webContents && permission === 'display-capture' && sharing())
   ses.setPermissionRequestHandler((contents, permission, callback, details) =>
@@ -365,6 +385,14 @@ if (primaryInstance) app.whenReady().then(async () => {
   if (await offerInstallation()) return
   updater = new Updater({ app, request: systemUpdateTransport(net, session.defaultSession),
     emit: state => send({ type: 'update', state }), canInstall: () => !current })
+  account = new DesktopAccount({
+    directory: app.getPath('userData'), storage:safeStorage, base:managedUrl,
+    fetchImpl: (url, init) => session.defaultSession.fetch(url, init),
+    onChange: state => {
+      if (current && current.token !== account.approvedToken) finish(state.message || '账号授权已结束。')
+      send({type:'account', account:state})
+    }
+  })
   preferences = new Settings(app.getPath('userData'), safeStorage)
   let startupError
   try { await preferences.load() } catch (err) { startupError = err.message }
@@ -380,6 +408,7 @@ if (primaryInstance) app.whenReady().then(async () => {
     })
   }
   openWindow()
+  void account.restore().catch(() => {})
   if (startupError) window.webContents.once('did-finish-load', () => send({ type: 'error', message: startupError }))
 })
 app.on('before-quit', () => { updater?.cancel(); finish() })

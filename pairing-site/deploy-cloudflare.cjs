@@ -116,7 +116,7 @@ async function deploy({account, token, slug, storage, transport=fetch}) {
     if (!state.pendingSecret) metadata.keep_bindings=['secret_text'];
     const form=new FormData();
     form.append('metadata',JSON.stringify(metadata));
-    form.append('index.js',new Blob([await fs.readFile(path.join(__dirname,'worker/index.js'))],{type:'application/javascript+module'}),'index.js');
+    form.append('index.js',new Blob([await (await import('./scripts/bundle.mjs')).bundleWorker()],{type:'application/javascript+module'}),'index.js');
     await api(`/workers/scripts/${slug}`,'PUT',form);
     const installed=await verifyWorker(api,slug,state);
     if (!installed?.some(b=>b.name==='CC_CF_TURN_API_TOKEN'&&b.type==='secret_text')) throw Error('Worker secret upload has not been confirmed. Retry with the same local state.');

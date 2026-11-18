@@ -15,6 +15,27 @@
       "when": 1794996817793,
       "tag": "0001_cloudflare_turn_grants",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1795006848602,
+      "tag": "0002_invited_accounts",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1795007035136,
+      "tag": "0003_relay_budgets",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1795007790102,
+      "tag": "0004_relay_daily_meter",
+      "breakpoints": true
     }
   ]
 }

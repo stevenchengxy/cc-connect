@@ -6,6 +6,11 @@ const call = name => (...args) => ipcRenderer.invoke('jianping:' + name, ...args
 })
 contextBridge.exposeInMainWorld('jianping', {
   info: call('info'),
+  login: call('account-login'),
+  register: call('account-register'),
+  refreshAccount: call('account-refresh'),
+  logout: call('account-logout'),
+  renewIce: call('renew-ice'),
   setLanguage: call('language'),
   checkUpdate: call('check-update'),
   downloadUpdate: call('download-update'),

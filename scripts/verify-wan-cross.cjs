@@ -28,8 +28,13 @@ if (electron) {
   electron.app.setPath('userData', profile)
   electron.app.dock?.hide()
 }
+const qaSession = JSON.parse(process.env.CC_WAN_QA_SESSION || '{}')
+delete process.env.CC_WAN_QA_SESSION
+if (qaSession.origin !== new URL(managedUrl).origin || !/^[A-Za-z0-9_-]{43}$/.test(qaSession.token || '')) {
+  throw new Error('An approved disposable QA session scoped to the chosen pairing origin is required')
+}
 const peer = new PairingNetwork({
-  managedUrl,
+  managedUrl, accountOnly:true, accountToken:qaSession.token,
   fetchImpl: electron ? (url, init) => electron.session.defaultSession.fetch(url, {...init, credentials:'omit'}) : undefined
 })
 const viewerName = 'CC Connect synthetic ' + mode + ' viewer'
@@ -102,7 +107,7 @@ async function main() {
           console.log('Managed pairing completed for', role, mode)
           const iceServers = await peer.getManagedIceServers()
           console.log('Managed TURN entries for', role, mode, iceServers.length)
-          await notify({type:'accepted', role, name:event.name, managedWan:true, managedIceServers:iceServers, allowControl:host && consentedControl})
+          await notify({type:'accepted', role, name:event.name, managedWan:true, managedIceServers:iceServers, managedIceExpiresAt:peer.managedIceExpiresAt, allowControl:host && consentedControl})
         } else if (event.type === 'signal') await notify({type:'signal', signal:event.payload})
         else await notify(event)
       }).catch(() => { events.push('signaling delivery stopped') })
@@ -110,6 +115,7 @@ async function main() {
     const notify = event => page.evaluate(e => window.qaEvent(e), event)
     // These fixed operations are the entire test bridge. No native input or
     // desktop capturer is loaded in this process.
+    await page.exposeFunction('qaRenewIce',async () => ({iceServers:await peer.getManagedIceServers(true),expiresAt:peer.managedIceExpiresAt}))
     await page.exposeFunction('qaSignal', signal => peer.signal(signal))
     await page.exposeFunction('qaStop', () => peer.stop())
     if (host) {
@@ -160,9 +166,9 @@ async function main() {
         }
       }
       window.jianping = {
-        info:async () => ({name:'Synthetic test',platform:'linux',version:'test',language:'en',inputSupported:host,iceServers:[]}),
+        info:async () => ({name:'Synthetic test',platform:'linux',version:'test',language:'en',inputSupported:host,iceServers:[],account:{status:'approved',username:'Synthetic QA'}}),
         setLanguage:async () => {}, onEvent:listener => { window.qaEvent=listener },
-        signal:window.qaSignal, disconnect:window.qaStop,
+        signal:window.qaSignal, disconnect:window.qaStop, renewIce:window.qaRenewIce,
         ...(host ? {host:window.qaHost,screens:async () => [{id:'synthetic',name:'Generated canvas',primary:true}],
           accept:async (allow, screen) => { await window.qaAllowCanvas(allow, screen); window.qaControlGranted = allow === true }}
           : {join:window.qaJoin})

@@ -1,42 +1,34 @@
 # 托管配对服务
 
-这个 Worker 用 D1 暂存一次性房间和加密信令。申请共享后，两台设备凭邀请各自注册一个角色。客户端在共享端同意后建立 WebRTC 连接。Worker 能确认角色已经注册，共享确认由客户端执行。房间初始有效期为 10 分钟，双方注册后的最长期限为 12 小时。关闭后保留最多 90 秒，供对端取走已发送的断开消息。服务拒绝读取过期房间，每次注册新房间时分批清理过期记录。
+Worker 用 D1 暂存房间和加密信令。共享端与控制端都须登录已经批准的账号，再用一次性设备邀请注册各自的角色。每次连接都需要共享端在本机确认。账号登录最长有效七天，房间等待加入的期限为十分钟，配对后的房间最长有效十二小时。正常关闭后，另一端有九十秒可读取已发出的断开消息。退出登录、暂停账号或撤销登录后，服务会立即停止该房间的信令，并通知中继模块撤销相关凭据。客户端须持续检查房间，以便另一端掉线或授权终止时关闭媒体。
 
-使用 GPT Sites 发布时，在 `.openai/hosting.json` 中保留项目 ID，设置 `"d1": "DB"`。运行 `node scripts/build.mjs` 构建 Worker，随部署一起打包 `drizzle/` 迁移。`GET /health` 可验证数据库绑定和迁移是否就绪。
+使用 GPT Sites 时，在 `.openai/hosting.json` 中保留项目 ID，并设置 `"d1": "DB"`。运行 `npm run build` 后，将构建产物连同 `drizzle/` 迁移发布。公开的 `GET /health` 可检查数据库是否已有账号表。
 
-## 给受限网络启用 TURN
+## 首次设置管理员
 
-配对服务的维护者需要一台可访问的公网 TURN 服务器及足够的带宽。以下配置在服务器和 Worker 各做一次。桌面端使用默认公网配对时自动获取短期凭据。
+1. 在维护者的电脑上，从仓库根目录运行以下命令。选择密码管理器可以接管的私有目录，目标文件应位于仓库、云同步和公开下载目录之外。
 
-1. 在 coturn 配置文件中设置以下参数。将域名改为自己的，使用密码管理器生成至少 32 字符的随机值替换占位符，限制配置文件的读取权限。`use-auth-secret` 使用 TURN REST 凭据，并取代固定 `user=` 方式。保留服务器适用的监听地址、NAT 映射、转发端口范围、内网禁转规则和访问限额。仓库 `relay/` 中的固定账号示例供自建信令模式使用。
-
-   ```ini
-   realm=turn.example.com
-   use-auth-secret
-   static-auth-secret=<运营者生成的随机值>
-   fingerprint
-   user-quota=8
-   total-quota=64
+   ```sh
+   node pairing-site/scripts/bootstrap.mjs "$HOME/.cc-connect-first-admin"
    ```
 
-2. 为 UDP/TCP 3478 和 UDP 转发端口范围配置防火墙。如果需要覆盖只允许 TLS 出站的网络，为 coturn 配置可验证的证书和对应 TLS 端口。可用独立 IP 的 TCP 443 承载 `turns`。只有 TLS 监听已通过验证时才发布该地址。
-3. 在配对 Worker 的运行时设置中添加 `CC_TURN_SECRET`，设为 coturn 的同一随机值。将 `CC_TURN_URLS` 设置为服务端实际监听的地址数组，例如 `["turn:turn.example.com:3478?transport=udp","turn:turn.example.com:3478?transport=tcp"]`。按 Sites 工作流重新发布。请将密钥保存在服务端运行时配置中。
-4. 在不同网络上运行两台客户端，以 TURN-only 测试确认双方收到 `relay` 候选、已选候选对并持续解码画面。服务商的带宽和配额按其实际限制生效。
+2. 命令会将 32 字节随机设置码写入仅当前用户可读的新文件，并在终端输出 `CC_ADMIN_BOOTSTRAP_SHA256` 值。将这个摘要写入生产 Worker 的同名 secret binding，然后发布新的服务版本。设置码原文仅交给首次创建管理员的人。
+3. 将下例中的域名替换为自己已验证的 HTTPS 服务，选择管理员用户名。命令从私有文件读取一次性设置码，并在本机终端隐藏输入两次新密码。密码管理器也可以经私有管道向命令提供密码，此时在末尾加 `--password-stdin`。
 
-客户端在两个角色都已注册的有效房间中使用 `GET /v1/rooms/{房间}/{角色}/ice` 及该角色的 bearer 获取凭据。凭据最长有效 60 分钟，且不超过房间到期时间。服务没有接入 TURN 时返回 204。已签发的凭据在到期前由 coturn 单独验证。长时间会话如果需要重新分配中继，应重新取得有效凭据。
+   ```sh
+   node pairing-site/scripts/bootstrap.mjs setup https://your-worker.example.com "$HOME/.cc-connect-first-admin" supervisor
+   ```
 
-[coturn TURN REST API 文档](https://github.com/coturn/coturn/blob/master/README.turnserver)
+   创建成功后，打开 `/admin` 登录，移除 Worker 的摘要绑定，删除本地的设置码文件，并将登录凭据保存到密码管理器。设置码在管理员已创建的数据库上永久失效。
+4. 管理员创建二十四小时有效、单次使用的注册邀请，使用私有渠道交给成员。成员选择用户名和密码，管理员在账号列表批准。批准一次即可发起或接受后续设备邀请，每次共享仍由共享端确认。
 
-## 使用 Cloudflare Realtime TURN
+管理员可以暂停账号，之后通过重新批准恢复使用。撤销是永久操作。撤销登录会话则让账号在所有设备上重新登录。暂停或撤销同时使既有房间失效，两端都要重新配对。管理员账号不能通过成员状态接口降权或停用。旧客户端和迁移前的房间没有登录绑定，不能获取项目中继或建立新的托管连接。
 
-维护者也可以使用 Cloudflare 的托管中继，免去自建公网 TURN 主机。
+账号名大小写不敏感，支持 3 至 40 位 ASCII 字母、数字及 `_.-`，首位使用字母或数字。密码长度为 12 至 128 个 UTF-16 单位。服务只存带随机盐的密码校验值、会话令牌摘要和账号状态。登录限流同时使用服务平台确认的来源和用户名短时摘要。会话令牌、邀请原文、设置码和密码请勿放入请求日志。
 
-1. 在自己的 Cloudflare 账户中创建 Realtime TURN Key。检查该账户的带宽额度、计费和用量告警。这个公开配对服务允许持有邀请的一对客户端获取中继凭据，使用量计入维护者的 Cloudflare 账户。
-2. 在配对 Worker 的运行时设置中配置 `CC_CF_TURN_KEY_ID` 和 `CC_CF_TURN_API_TOKEN`，值分别来自该 TURN Key 的 ID 和 API Token。保留其中一种提供商配置。使用 Cloudflare 时清空 `CC_TURN_URLS` 和 `CC_TURN_SECRET`。
-3. 发布数据库迁移与 Worker。两个角色注册后，应用可通过相同的 `/ice` 接口取得有时限的 Cloudflare 凭据。每个角色复用自己的有效凭据，并发请求共用签发锁。服务端在 D1 缓存短期凭据，房间清理时删除。长期 API Token 仅用于 Worker 调用 Cloudflare 的固定 HTTPS 接口。
-4. 使用两个不同网络的设备进行 TURN-only 的画面传输验收，并在供应商控制台核对用量。
+## 跨网中继
 
-[Cloudflare 官方凭据文档](https://developers.cloudflare.com/realtime/turn/generate-credentials/)
+新服务的公共 TURN 默认关闭。维护者可以在管理页设置中继策略及配额，并在服务端检查计量凭据。参见[公共 TURN 流量与配额](./TURN-USAGE.md)。
 
 ## 部署到自己的 Cloudflare 账户
 

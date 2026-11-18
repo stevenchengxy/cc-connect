@@ -269,3 +269,53 @@ test('configured TURN failure can recover, while no configured TURN is a normal 
   assert.deepEqual(await mailbox.ice(), []);
   assert.equal(mailbox.iceUnavailable, false);
 });
+
+test('approved-account desktop enrolls both roles only via the official API and rejects legacy invitations', async t => {
+  const fixture = managedFixture();
+  const tokens = {host:randomBytes(32).toString('base64url'), viewer:randomBytes(32).toString('base64url')};
+  const calls = [];
+  const get = role => new PairingNetwork({...fixture, accountOnly:true, accountToken:tokens[role], fetchImpl: (url, options) => {
+    assert.equal(new URL(url).origin,'https://relay.example');
+    assert.equal(options.headers['x-cc-session'],tokens[role]);
+    assert.equal(options.redirect,'error');
+    calls.push(role);
+    return fixture.fetchImpl(url,options);
+  }});
+  assert.throws(()=>new PairingNetwork({...fixture,accountOnly:true}),/登录/);
+  const host=get('host'), viewer=get('viewer');
+  t.after(()=>{host.stop(); viewer.stop();});
+  const {invite} = await host.host({relayUrl:'wss://ignored.invalid',address:'127.0.0.1'});
+  const spec=JSON.parse(Buffer.from(invite.slice(4),'base64url'));
+  assert.deepEqual(Object.keys(spec).sort(),['account','exp','key','managed']);
+  assert(!Object.values(spec).includes(tokens.host)); assert(!host.state.server);
+  await assert.rejects(viewer.join({invite:change(invite,{account:undefined})}),/两端升级/);
+  const request=next(host,'request');
+  await viewer.join({invite,name:'Approved'});
+  await request;
+  const accepted=next(viewer,'connected');
+  host.respond(true); assert.equal((await accepted).managedWan,true);
+  assert(calls.includes('viewer'));
+  const blocked = new PairingNetwork({...fixture,accountOnly:true,accountToken:tokens.host,fetchImpl:async () =>
+    Response.json({error:'account_suspended'},{status:403})});
+  await assert.rejects(blocked.host({address:'127.0.0.1'}),/已停用/);
+  assert.equal(blocked.state,null);
+});
+
+test('managed relay grants refresh before expiry and disappear when renewal is denied', async () => {
+  const {Mailbox} = require('../src/managed-mailbox.cjs');
+  const time=Date.now(); let calls=0;
+  const ws = new Mailbox('https://pair.example/v1','host',randomBytes(32),async () => {
+    calls++;
+    return calls === 1 ? Response.json({iceServers:[{urls:'turn:relay.example',username:'u',credential:'v'}], expiresAt:time+120000})
+      : Response.json({error:'relay_quota_exhausted'},{status:403});
+  },randomBytes(32).toString('base64url'));
+  ws.readyState=1; ws.active=true;
+  const net=new PairingNetwork();net.state={peer:{ws,phase:'active',managedWan:true}};
+  assert.equal((await net.getManagedIceServers()).length,1);
+  assert.equal((await net.getManagedIceServers(true)).length,1);
+  assert.equal(calls,1);
+  ws.iceExpiresAt=Date.now()+25000;
+  assert.deepEqual(await net.getManagedIceServers(true),[]);
+  assert.equal(net.managedIceUnavailable,true);
+  assert.equal(net.managedIceExpiresAt,0);
+});

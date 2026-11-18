@@ -1,5 +1,6 @@
 'use strict';
 
+const { messages, readJSON } = require('./account.cjs');
 const { EventEmitter } = require('node:events');
 const { createHash, createHmac, randomBytes } = require('node:crypto');
 const { setTimeout: sleep } = require('node:timers/promises');
@@ -49,7 +50,7 @@ function iceServers(config) {
 }
 
 class Mailbox extends EventEmitter {
-  constructor(base, role, secret, fetchImpl) {
+  constructor(base, role, secret, fetchImpl, accountToken) {
     super();
     const url = new URL(base);
     if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) throw new Error('Invalid managed pairing service URL');
@@ -58,6 +59,7 @@ class Mailbox extends EventEmitter {
     const viewerProof = digest('rd1-managed-viewer-proof');
     this.proof = role === 'viewer' ? viewerProof : createHash('sha256').update(viewerProof).digest('hex');
     this.authorization = 'Bearer ' + randomBytes(32).toString('base64url');
+    this.authHeaders = { authorization:this.authorization, ...(accountToken && { 'x-cc-session':accountToken }) };
     this.fetch = fetchImpl;
     this.role = role;
     this.sent = 0;
@@ -72,16 +74,25 @@ class Mailbox extends EventEmitter {
 
   async request(method, suffix, opts = {}) {
     const signal = AbortSignal.any([this.controller.signal, AbortSignal.timeout(opts.timeout ?? 5500)]);
-    return this.fetch(this.url + suffix, {
+    const response = await this.fetch(this.url + suffix, {
       method, redirect: 'error', cache: 'no-store', signal,
-      headers: { authorization: this.authorization, ...opts.headers }, body: opts.body
+      headers: { ...this.authHeaders, ...opts.headers }, credentials: 'omit', body: opts.body
     });
+    if (this.authHeaders['x-cc-session'] && [401,403].includes(response.status) && response.headers.get('content-type')?.includes('application/json')) {
+      const { error } = await readJSON(response).catch(() => ({}));
+      if (['account_required','account_pending','account_suspended','account_revoked'].includes(error)) {
+        this.accountError = messages[error];
+        this.terminate();
+      }
+    }
+    return response;
   }
 
   async ice() {
     if (!this.active || this.readyState !== OPEN) return [];
     try {
       this.iceUnavailable = false;
+      this.iceExpiresAt = 0;
       const response = await this.retryRequest('GET', '/ice', { timeout: 7000 }, 2);
       if (response.status !== 200) {
         this.iceUnavailable = response.status !== 204;
@@ -95,7 +106,10 @@ class Mailbox extends EventEmitter {
         if (size > 16 * 1024) throw new Error('Invalid grant size');
         chunks.push(bytes);
       }
-      const servers = iceServers(JSON.parse(Buffer.concat(chunks, size)));
+      const grant = JSON.parse(Buffer.concat(chunks, size));
+      if (this.authHeaders['x-cc-session'] && (!Number.isSafeInteger(grant.expiresAt) || grant.expiresAt <= Date.now())) throw new Error('Expired grant');
+      const servers = iceServers(grant);
+      this.iceExpiresAt = Number.isSafeInteger(grant.expiresAt) ? grant.expiresAt : 0;
       this.iceUnavailable = servers.length === 0;
       return servers;
     } catch { this.iceUnavailable = true; return []; }
@@ -104,9 +118,9 @@ class Mailbox extends EventEmitter {
   async register() {
     let response;
     try { response = await this.retryRequest('POST', '', { headers: { 'x-viewer-proof': this.proof } }, 2); }
-    catch { throw new Error(unreachable); }
+    catch { throw new Error(this.accountError || unreachable); }
     await response.body?.cancel();
-    if (response.status !== 201 && response.status !== 200) throw new Error(registrationFailure(response));
+    if (response.status !== 201 && response.status !== 200) throw new Error(this.accountError || registrationFailure(response));
     this.registered = true;
     this.readyState = OPEN;
   }
@@ -174,7 +188,7 @@ class Mailbox extends EventEmitter {
     this.controller.abort();
     if (this.registered) {
       void this.fetch(this.url, {
-        method: 'DELETE', headers: { authorization: this.authorization },
+        method: 'DELETE', headers: this.authHeaders, credentials:'omit',
         redirect: 'error', signal: AbortSignal.timeout(3000)
       }).then(response => response.body?.cancel()).catch(() => {});
     }

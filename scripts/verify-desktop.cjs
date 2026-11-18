@@ -8,6 +8,7 @@ const { spawn } = require('node:child_process')
 
 const publicIceOnly = process.argv.includes('--public-ice-only')
 const wan = publicIceOnly || process.argv.includes('--wan')
+const loopbackRelay = process.argv.includes('--loopback-relay')
 
 async function observeInternetConnection(page) {
   await page.evaluate(restrictCandidates => {
@@ -59,16 +60,36 @@ async function verifyInternetConnection(page) {
 async function run() {
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'jianping-e2e-'))
   const apps = []
+  let relay, fixture
   async function launch(name) {
     const args = [path.join(__dirname, 'fixtures', 'desktop.cjs'), '--user-data-dir=' + path.join(temp, name)]
-    if (!wan) args.push('--test-local-pairing')
     if (name === 'host') args.push('--synthetic-source')
-    const instance = await _electron.launch({ executablePath: require('electron'), args })
+    const instance = await _electron.launch({ executablePath: require('electron'), args, env:{...process.env, CC_QA_ACCOUNT_ORIGIN:fixture?.origin || ''} })
     apps.push(instance)
     for (let i = 0; i < 150; i++) {
       const page = instance.windows().find(w => w.url().endsWith('/src/ui/index.html'))
       if (page) {
         await page.waitForFunction(() => window.jianping && document.getElementById('device-name').textContent !== '正在读取设备…')
+        const username = wan ? process.env['CC_QA_' + name.toUpperCase() + '_USERNAME'] : 'qa.' + name
+        const password = wan ? process.env['CC_QA_' + name.toUpperCase() + '_PASSWORD'] : require('node:crypto').randomBytes(24).toString('base64url')
+        if (!username || !password) throw new Error('Public account QA requires two explicitly provisioned QA accounts')
+        const refuse = () => page.evaluate(async () => {
+          const pairing = await Promise.allSettled([window.jianping.host(),window.jianping.join('test')])
+          return pairing.every(run => run.status === 'rejected')
+        })
+        assert(await refuse(), 'Signed-out host and join IPC must fail')
+        if (fixture) await page.locator('#account-switch').click()
+        await page.locator('#account-username').fill(username)
+        await page.locator('#account-password').fill(password)
+        if (fixture) await page.locator('#register-invite').fill(await fixture.invite())
+        await page.locator('#account-submit').click()
+        if (fixture) {
+          await page.locator('#account-refresh').waitFor({state:'visible'})
+          assert(await refuse(), 'Pending accounts must be blocked by both pairing IPC paths')
+          await fixture.setStatus(username,'approved')
+          await page.locator('#account-refresh').click()
+        }
+        await page.locator('#join-button').waitFor({state:'visible'})
         await page.locator('#language-select').selectOption('en')
         await page.waitForFunction(() => document.documentElement.lang === 'en')
         assert.equal(await page.locator('#join-button').innerText(), 'Connect')
@@ -84,9 +105,29 @@ async function run() {
     throw Error('应用窗口未就绪')
   }
   try {
+    if (loopbackRelay) relay=await require('./fixtures/loopback-turn.cjs').startLoopbackTurn()
+    if (!wan) fixture=await require('./fixtures/account-service.cjs').startAccountFixture(relay)
     const host = await launch('host')
     const viewer = await launch('viewer')
     if (wan) await Promise.all([observeInternetConnection(host), observeInternetConnection(viewer)])
+    if (relay) for (const page of [host,viewer]) {
+      await page.evaluate(() => {
+        const Native = window.RTCPeerConnection
+        const localOnly = config => ({...config, iceTransportPolicy:'relay',
+          iceServers:config.iceServers.filter(server => [server.urls].flat().some(url => url.startsWith('turn:127.0.0.1:')))})
+        window.RTCPeerConnection = class extends Native {
+          constructor(config) {
+            super(localOnly(config)); window.testPeerConnection = this; this.restarts=0; this.relayErrors=[]
+            this.addEventListener('icecandidateerror',event => this.relayErrors.push([event.errorCode,event.errorText]))
+          }
+          setConfiguration(config) { return super.setConfiguration(localOnly(config)) }
+          async createOffer(options) { if (options?.iceRestart) this.restarts++; return super.createOffer(options) }
+        }
+        window.testCaptures=0
+        const capture=navigator.mediaDevices.getDisplayMedia.bind(navigator.mediaDevices)
+        navigator.mediaDevices.getDisplayMedia=async options=>{const stream=await capture(options); window.testCaptures++; return stream}
+      })
+    }
     const duplicate = spawn(require('electron'), [path.resolve(__dirname, '..'), '--user-data-dir=' + path.join(temp, 'viewer')], { stdio: 'ignore' })
     const exitCode = await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => { duplicate.kill(); reject(new Error('Duplicate application instance did not exit')) }, 10000)
@@ -132,7 +173,16 @@ async function run() {
         return video.videoWidth > 0 && video.getVideoPlaybackQuality().totalVideoFrames >= 3
       }, null, { timeout: wan ? 60000 : 20000 })
     } catch (error) {
-      const summary = page => page.locator('body').innerText()
+      const summary = async page => {
+        const state = await page.evaluate(async () => {
+          const pc=window.testPeerConnection
+          if (!pc) return {}
+          const report=[...await pc.getStats()].map(([,v])=>v)
+          return {state:pc.connectionState,ice:pc.iceGatheringState,signal:pc.signalingState,
+            offers:[pc.localDescription?.type,pc.remoteDescription?.type],iceServers:pc.getConfiguration().iceServers.length,errors:pc.relayErrors,stats:report.filter(s=>s.type.endsWith('candidate')||s.type==='candidate-pair').map(s=>[s.type,s.candidateType,s.state,s.protocol,s.relayProtocol])}
+        })
+        return JSON.stringify(state) + '\n' + await page.locator('body').innerText()
+      }
       throw new Error('视频未就绪。\n' + await summary(host) + '\n' + await summary(viewer), { cause: error })
     }
     const result = await viewer.evaluate(() => {
@@ -146,12 +196,31 @@ async function run() {
       const paths = await Promise.all([verifyInternetConnection(host), verifyInternetConnection(viewer)])
       console.log('Verified public pairing at both endpoints. Selected remote ICE candidate types:', paths)
     }
-    await host.locator('#end-session').click()
+    if (relay) {
+      await host.waitForFunction(() => window.testPeerConnection?.restarts >= 1, null, {timeout:36000})
+      await viewer.waitForFunction(() => window.testPeerConnection.connectionState === 'connected' &&
+        document.getElementById('remote-video').getVideoPlaybackQuality().totalVideoFrames > 8)
+      for (let i=0;i<100 && Math.min(relay.grants.host,relay.grants.viewer)<2;i++) await delay(150)
+      assert(relay.grants.host >= 2 && relay.grants.viewer >= 2,'Both authorized endpoints must renew their relay grants')
+      await host.waitForFunction(() => window.testPeerConnection.signalingState === 'stable' && window.testPeerConnection.connectionState === 'connected')
+      const before=await viewer.locator('#remote-video').evaluate(video=>video.getVideoPlaybackQuality().totalVideoFrames)
+      await viewer.waitForFunction(count => document.getElementById('remote-video').getVideoPlaybackQuality().totalVideoFrames >= count+3,before)
+      assert.equal(await host.evaluate(() => window.testCaptures),1)
+      assert.match(await viewer.locator('#session-stats').innerText(),/加密中继/)
+      relay.denied = true
+      await host.locator('#host-button').waitFor({state:'visible',timeout:35000})
+      console.log('Verified loopback TURN renewal, ICE restart, one capture permission, and shutdown after relay budget refusal.',relay.grants)
+    } else if (fixture) {
+      await fixture.setStatus('qa.host','suspended')
+      await host.locator('#account-form').waitFor({state:'visible'})
+    } else await host.locator('#end-session').click()
     await viewer.waitForFunction(() => !document.getElementById('home').hidden)
     assert.equal(await viewer.locator('#remote-video').evaluate(v => v.srcObject), null)
     console.log('Passed single-instance lock, custom selection, three languages, Electron pairing, denial, explicit consent, synthetic WebRTC frames, stats, and remote disconnect.', result)
   } finally {
     await Promise.allSettled(apps.map(instance => instance.close()))
+    await fixture?.close()
+    await relay?.close()
     await fs.rm(temp, { recursive: true, force: true })
   }
 }

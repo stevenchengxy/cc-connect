@@ -378,3 +378,12 @@ select.custom-select-native {
   .select-listbox,.select-button,.update-button { backdrop-filter: none; -webkit-backdrop-filter: none; background: #fcfdff; border-color: #a2b3c7; }
   .select-option.is-active { background: #d5e4f6; outline: 1px solid #7e96b3; }
 }
+
+.account-card { width: min(100%, 450px); padding: clamp(24px,3vw,34px); }
+.account-card h2 { margin: 0 0 12px; }
+.account-card input { width: 100%; }
+.account-actions { display: flex; align-items: center; gap: 16px; margin-top: 20px; }
+.account-actions .primary { min-width: 94px; justify-content: center; }
+#account-identity { margin-bottom: 16px; }
+#registration-help { margin-top: 8px; }
+.workspace:has(#account-panel:not([hidden])) .hero { height: clamp(115px,23vh,180px); }
