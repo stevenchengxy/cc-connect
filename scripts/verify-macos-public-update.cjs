@@ -1,0 +1,139 @@
+// Manual CI on a fresh GitHub macOS VM. Drive only the installed package's own
+// update buttons. The relaunch is performed by its original macOS installer.
+const assert = require('node:assert/strict')
+const fs = require('node:fs/promises')
+const os = require('node:os')
+const path = require('node:path')
+const {createReadStream} = require('node:fs')
+const {createHash} = require('node:crypto')
+const {execFileSync, spawn} = require('node:child_process')
+const {setTimeout: wait} = require('node:timers/promises')
+const {chromium} = require('playwright-core')
+const {extractFile, uncache} = require('@electron/asar')
+
+const appPath = '/Applications/CC Connect.app'
+const executable = path.join(appPath,'Contents/MacOS/CC Connect')
+const asarPath = path.join(appPath,'Contents/Resources/app.asar')
+const targetSHA = 'ecb6918e2610eaa424bbeac5d84cb06fc009bc88951fcee853407ce99e94b34b'
+const targetName = 'CC-Connect-0.4.0-universal.dmg'
+const updates = path.join(os.homedir(),'Library/Application Support/CC Connect/updates')
+const profile = path.dirname(updates)
+const netLog = path.join(process.env.RUNNER_TEMP || os.tmpdir(),'cc-connect-update-netlog.json')
+
+let launched
+const version = () => { uncache(asarPath); return JSON.parse(extractFile(asarPath,'package.json')).version }
+const exists = p => fs.access(p).then(()=>true,()=>false)
+
+async function observe(f,ms) {
+  const end = Date.now()+ms
+  while (Date.now()<end) {
+    const result = await f()
+    if (result) return result
+    await wait(350)
+  }
+  throw Error('Timed out waiting for the installed application')
+}
+
+function start() {
+  const process = spawn(executable,['--remote-debugging-address=127.0.0.1','--remote-debugging-port=0',
+    '--log-net-log='+netLog],{stdio:['ignore','ignore','pipe']})
+  let address, logs = ''
+  process.stderr.on('data',chunk=>{
+    // Chromium writes URLs into its diagnostic output. Only retain its local
+    // debugger address, never send HTTP URLs or signed asset query strings to CI.
+    logs = (logs+chunk).slice(-32000)
+    address ||= logs.match(/DevTools listening on (ws:\/\/127\.0\.0\.1:\d+\/devtools\/browser\/[a-f\d-]+)/i)?.[1]
+  })
+  return {process,address:()=>address}
+}
+
+async function waitPhase(page,expected,ms) {
+  const end = Date.now()+ms
+  while (Date.now()<end) {
+    const phase = await page.locator('#update-status').getAttribute('data-state')
+    if (phase===expected) return
+    if (phase==='error') {
+      const info=await page.evaluate(()=>window.jianping.info())
+      throw Error('Packaged updater reported '+(info.update?.code || 'error')+' during '+expected)
+    }
+    await wait(500)
+  }
+  throw Error('Timed out reaching updater state '+expected)
+}
+
+async function checkDownload() {
+  for (const name of await fs.readdir(updates)) {
+    if (!name.startsWith('download-')) continue
+    const file = path.join(updates,name,targetName)
+    if (!await exists(file)) continue
+    const hash = createHash('sha256')
+    for await (const chunk of createReadStream(file)) hash.update(chunk)
+    assert.equal(hash.digest('hex'),targetSHA)
+    assert.equal((await fs.stat(file)).size,227203197)
+    console.log('Downloaded version 0.4.0 DMG matched 227203197 bytes and SHA-256',targetSHA)
+    return
+  }
+  throw Error('The packaged updater did not stage the expected DMG')
+}
+
+async function run() {
+  assert.equal(process.platform,'darwin')
+  assert.equal(process.env.GITHUB_ACTIONS,'true')
+  assert.equal(process.env.RUNNER_ENVIRONMENT,'github-hosted')
+  assert.equal(version(),'0.3.3')
+  assert(await exists(executable))
+  assert(!await exists(profile),'Expected a fresh disposable runner profile')
+  const old = start()
+  launched = old.process
+  const ws = await observe(()=>{
+    if (old.process.exitCode!==null) throw Error('Old package exited before opening')
+    return old.address()
+  },30000)
+  const browser = await chromium.connectOverCDP(ws)
+  const page = await observe(()=>browser.contexts().flatMap(c=>c.pages()).find(p=>p.url().startsWith('file:')),20000)
+  const appInfo=await page.evaluate(()=>window.jianping.info())
+  assert.equal(appInfo.version,'0.3.3')
+  console.log('Installed 0.3.3 app opened on fresh',process.arch,'GitHub Mac')
+  await page.locator('#update-button').click()
+  await waitPhase(page,'available',60000)
+  assert.equal((await page.evaluate(()=>window.jianping.info())).update.version,'0.4.0')
+  console.log('Packaged updater accepted the public signed manifest for 0.4.0')
+  await page.locator('#update-action').click()
+  await waitPhase(page,'ready',240000)
+  await checkDownload()
+  await page.locator('#update-action').click()
+  await observe(()=>old.process.exitCode!==null,70000)
+  assert.equal(old.process.exitCode,0)
+  await observe(async()=>await exists(asarPath) && version()==='0.4.0',60000)
+  const bundleId=execFileSync('/usr/libexec/PlistBuddy',['-c','Print :CFBundleIdentifier',appPath+'/Contents/Info.plist'],{encoding:'utf8'}).trim()
+  assert.equal(bundleId,'app.jianping.desktop')
+  assert.equal(execFileSync('/usr/libexec/PlistBuddy',['-c','Print :CFBundleShortVersionString',appPath+'/Contents/Info.plist'],{encoding:'utf8'}).trim(),'0.4.0')
+  execFileSync('/usr/bin/codesign',['--verify','--deep','--strict',appPath])
+  assert(!await exists(path.join(os.homedir(),'Applications/CC Connect.app')))
+  const swift = `import AppKit
+let target="/Applications/CC Connect.app"
+let stop=Date().addingTimeInterval(25)
+while Date() < stop {
+  let apps=NSRunningApplication.runningApplications(withBundleIdentifier:"app.jianping.desktop").filter{!$0.isTerminated}
+  if apps.count == 1, apps[0].bundleURL?.path == target, apps[0].isFinishedLaunching, apps[0].processIdentifier != ${old.process.pid} {
+    print("Relaunched 0.4.0 at the original path with one live instance");exit(0)
+  }
+  RunLoop.current.run(until:Date().addingTimeInterval(0.4))
+}
+exit(1)`
+  console.log(execFileSync('/usr/bin/swift',['-'],{input:swift,encoding:'utf8',timeout:60000}).trim())
+  const urls=new Set()
+  for (const event of JSON.parse(await fs.readFile(netLog,'utf8')).events) {
+    if (typeof event.params?.url!=='string') continue
+    try { const u=new URL(event.params.url);urls.add(u.hostname+u.pathname) } catch {}
+  }
+  assert(urls.has('cc-connect-desktop.stevenchengxy19.chatgpt.site/updates/latest.json'))
+  assert(urls.has('github.com/stevenchengxy/cc-connect/releases/download/v0.4.0/'+targetName))
+  assert([...urls].some(s=>s.startsWith('release-assets.githubusercontent.com/') || s.startsWith('objects.githubusercontent.com/')))
+  console.log('Chromium network log confirmed production manifest, public GitHub release, and release-asset transfer')
+}
+
+run().catch(error=>{console.error(error.message);process.exitCode=1}).finally(async()=>{
+  if (launched && launched.exitCode===null && !launched.signalCode) launched.kill('SIGTERM')
+  await fs.rm(netLog,{force:true})
+})

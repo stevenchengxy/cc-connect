@@ -1,0 +1,32 @@
+name: macOS public in-app update
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  upgrade:
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@8f4b7f84864484a7bf31766abe9204da3cbe65b3
+        with:
+          persist-credentials: false
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Install the public 0.3.3 distribution on this disposable Mac
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact="$RUNNER_TEMP/CC-Connect-0.3.3-universal.dmg"
+          mount="$RUNNER_TEMP/cc-connect-old-image"
+          target="/Applications/CC Connect.app"
+          test ! -e "$target"
+          test ! -e "$HOME/Applications/CC Connect.app"
+          mkdir "$mount"
+          curl -fsSL --retry 2 --max-time 120 'https://github.com/stevenchengxy/cc-connect/releases/download/v0.3.3/CC-Connect-0.3.3-universal.dmg' -o "$artifact"
+          echo "1e008aa0bf575ae6c619d11b100280c515744724b87367fbd12aee238ac491f5  $artifact" | shasum -a 256 -c -
+          hdiutil attach -readonly -nobrowse -noautoopen -mountpoint "$mount" "$artifact"
+          trap 'hdiutil detach "$mount"' EXIT
+          codesign --verify --deep --strict "$mount/CC Connect.app"
+          ditto "$mount/CC Connect.app" "$target"
+          codesign --verify --deep --strict "$target"
+      - name: Check, download and install with the packaged app
+        run: node scripts/verify-macos-public-update.cjs
