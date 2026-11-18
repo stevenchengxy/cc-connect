@@ -6,6 +6,19 @@ const defaults = {mode:'off', limit_bytes:0, max_concurrent:0, revision:0};
 const limit = value => value - Math.ceil(value / 10); // stop issuing at 90% of either budget
 const REVOCATION_BATCH = 20;
 const ACTIVE = "state IN ('issuing','active','revoking')";
+// Each stored account row is one cumulative high-water mark per billing period.
+// These accounts are part of the provider's global aggregate, so the two views
+// overlap and must never be added together.
+const attributedHighWater = `(SELECT coalesce(sum(a.high_egress),0) FROM relay_meters a
+  WHERE a.period_start=gm.period_start AND a.scope!='global')`;
+const globalBudgetUse = `max(gm.high_egress,${attributedHighWater})`;
+
+async function globalMeter(db,period) {
+  const row=await db.prepare(`SELECT gm.high_egress, gm.ever_reported, ${attributedHighWater} AS attributed
+    FROM relay_meters gm WHERE gm.scope='global' AND gm.period_start=?`).bind(period).first();
+  if (!row || ![row.high_egress,row.attributed].every(n=>Number.isSafeInteger(n)&&n>=0)) throw Error('Incomplete global meter');
+  return {...row,budgetEgressBytes:Math.max(row.high_egress,row.attributed)};
+}
 
 async function quota(db, scope) {
   return await db.prepare('SELECT * FROM relay_quotas WHERE scope=?').bind(scope).first() || defaults;
@@ -17,10 +30,12 @@ async function meter(env, scope) {
     ON CONFLICT(scope,period_start) DO UPDATE SET checked=max(checked,excluded.checked),
     high_egress=max(high_egress,excluded.high_egress),ever_reported=max(ever_reported,excluded.ever_reported)`)
     .bind(scope,m.periodStart,m.checkedAt,m.egressBytes,Number(m.hasRecords)).run();
-  const row = await db.prepare('SELECT high_egress,ever_reported FROM relay_meters WHERE scope=? AND period_start=?')
+  const row = scope==='global' ? await globalMeter(db,m.periodStart)
+    : await db.prepare('SELECT high_egress,ever_reported FROM relay_meters WHERE scope=? AND period_start=?')
     .bind(scope,m.periodStart).first();
   if (!row || (!m.hasRecords && row.ever_reported)) throw Error('Incomplete meter');
-  return {...m, highWaterEgressBytes:row.high_egress};
+  return {...m, highWaterEgressBytes:row.high_egress, budgetEgressBytes:row.budgetEgressBytes ?? row.high_egress,
+    ...(scope==='global' ? {attributedHighWaterEgressBytes:row.attributed} : {})};
 }
 
 function matching(scope, id) {
@@ -71,7 +86,7 @@ function allowedPolicy() {
   return `EXISTS(SELECT 1 FROM relay_quotas g JOIN relay_quotas u ON u.scope=?
     JOIN relay_meters gm ON gm.scope=g.scope AND gm.period_start=? JOIN relay_meters um ON um.scope=u.scope AND um.period_start=gm.period_start
     WHERE g.scope='global' AND g.mode='protected' AND g.revision=? AND u.revision=?
-    AND g.max_concurrent>0 AND u.max_concurrent>0 AND gm.high_egress<? AND um.high_egress<? AND gm.checked>=? AND um.checked>=?
+    AND g.max_concurrent>0 AND u.max_concurrent>0 AND ${globalBudgetUse}<? AND um.high_egress<? AND gm.checked>=? AND um.checked>=?
     AND NOT EXISTS(SELECT 1 FROM relay_leases WHERE state='revoking' AND expires>?))`;
 }
 
@@ -104,9 +119,13 @@ export async function managedIce(env,{accountId,roomId,role,roomExpiresAt}) {
   }
   if (observations[1].status !== 'fulfilled') { await revokeMatching(env,'account',accountId); return reply(503); }
   const [g,u] = observations.map(o=>o.value);
-  if (g.highWaterEgressBytes >= limit(global.limit_bytes)) { await revokeMatching(env,'global'); return reply(403); }
-  if (u.highWaterEgressBytes >= limit(user.limit_bytes)) { await revokeMatching(env,'account',accountId); return reply(403); }
   if (g.periodStart !== u.periodStart) return reply(503);
+  // The individual and provider queries run concurrently. Re-read the durable
+  // total after both finish, including this participant's newly observed bytes.
+  if ((await globalMeter(db,g.periodStart)).budgetEgressBytes >= limit(global.limit_bytes)) {
+    await revokeMatching(env,'global'); return reply(403);
+  }
+  if (u.budgetEgressBytes >= limit(user.limit_bytes)) { await revokeMatching(env,'account',accountId); return reply(403); }
   const pending = await db.prepare("SELECT id,key_id,username FROM relay_leases WHERE state='revoking' AND username IS NOT NULL AND expires>? LIMIT 4")
     .bind(Date.now()).all();
   await retryRevocations(env,pending.results);
@@ -160,7 +179,7 @@ async function usageView(env,scope,enforce = true) {
   let usage = null, diagnostic;
   try { usage = await meter(env,scope); }
   catch (error) { diagnostic = meterDiagnostic(error); }
-  if (enforce && activeGrants && (!usage || usage.highWaterEgressBytes >= limit(policy.limit_bytes))) {
+  if (enforce && activeGrants && (!usage || usage.budgetEgressBytes >= limit(policy.limit_bytes))) {
     await revokeMatching(env,scope === 'global' ? 'global' : 'account',scope);
   }
   return {scope,mode:global.mode,limitBytes:policy.limit_bytes,maxConcurrent:policy.max_concurrent,
@@ -212,7 +231,7 @@ export async function usageAdmin(request,env,actor) {
       if (!issuerConfigured(env)) return reply(503,{error:'relay_unavailable',meterDiagnostic:{stage:'turn_issuer',reason:'binding'}});
       try {
         const [observed]=await Promise.all([meter(env,'global'),verifyKeyOwner(env)]);
-        if (observed.highWaterEgressBytes>=limit(bytes)) return reply(409);
+        if (observed.budgetEgressBytes>=limit(bytes)) return reply(409);
       } catch (error) { return reply(503,{error:'relay_unavailable',meterDiagnostic:meterDiagnostic(error)}); }
     }
   }
@@ -240,9 +259,11 @@ export async function reconcileRelayUsage(env) {
   if (!active.length) return;
   const g=await quota(db,'global');
   if (g.mode!=='protected' || !g.max_concurrent) return revokeMatching(env,'global');
+  let period;
   try {
     const [global]=await Promise.all([meter(env,'global'),verifyKeyOwner(env)]);
-    if (global.highWaterEgressBytes>=limit(g.limit_bytes)) return revokeMatching(env,'global');
+    period=global.periodStart;
+    if (global.budgetEgressBytes>=limit(g.limit_bytes)) return revokeMatching(env,'global');
   } catch { return revokeMatching(env,'global'); }
   const {results:pending}=await db.prepare("SELECT id,key_id,username FROM relay_leases WHERE state='revoking' AND username IS NOT NULL AND expires>? LIMIT ?")
     .bind(now,REVOCATION_BATCH).all();
@@ -252,6 +273,7 @@ export async function reconcileRelayUsage(env) {
     if (status?.status!=='approved') await revokeAccountRelay(env,account);
     else await usageView(env,account);
   }
+  if ((await globalMeter(db,period)).budgetEgressBytes>=limit(g.limit_bytes)) await revokeMatching(env,'global');
 }
 
 // The timer and authenticated polling share one durable lease across isolates.

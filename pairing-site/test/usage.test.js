@@ -27,8 +27,11 @@ function setup(t) {
       assert.equal(init.headers.authorization,'Bearer '+env.CC_CF_ANALYTICS_TOKEN);
       const {query}=JSON.parse(init.body);state.queries.push(query);
       if (!state.meter) return Response.json({errors:[{message:'forbidden'}]});
-      const egress=query.includes('customIdentifier') ? state.personal:state.global;
-      const rows=state.records ? [{sum:{egressBytes:egress,ingressBytes:2}}] : [];
+      const individual=query.includes('customIdentifier');
+      if (individual && state.beforePersonal) await state.beforePersonal();
+      const egress=individual ? state.personal:state.global;
+      const hasRecords=(individual ? state.personalRecords : state.globalRecords) ?? state.records;
+      const rows=hasRecords ? [{sum:{egressBytes:egress,ingressBytes:2}}] : [];
       return Response.json({data:{viewer:{accounts:[{accountTag:env.CC_CF_ACCOUNT_ID,callsTurnUsageAdaptiveGroups:rows}]}}});
     }
     if (url.startsWith('https://api.cloudflare.com/client/v4/accounts/')) {
@@ -237,4 +240,48 @@ test('authenticated provider reads treat redirects as failures and never request
   assert.deepEqual(view.meterDiagnostic,{stage:'analytics',reason:'http',httpStatus:302});
   assert.deepEqual(observed,['https://api.cloudflare.com/client/v4/graphql']);
   assert.deepEqual((await f.grant()).status,204);
+});
+
+test('lagging provider totals use unique current-period account high-waters without double-counting',async t=>{
+  const f=setup(t);await f.configure();
+  const inspect=async id=>(await f.adminRequest('GET',id?'usage?accountId='+id:'usage')).json();
+  f.state.personalRecords=true;
+  f.state.personal=7580;await inspect(f.host);
+  f.state.personal=47088;await inspect(f.viewer);await inspect(f.viewer);
+  f.state.personal=37000;await inspect(f.viewer);
+  f.sql.prepare('INSERT INTO relay_meters(scope,period_start,checked,high_egress,ever_reported) VALUES(?,?,?,?,1)')
+    .run(f.host,'2000-01-01T00:00:00.000Z',1,500000);
+  const lagged=(await inspect()).usage;
+  assert.equal(lagged.hasRecords,false);assert.equal(lagged.egressBytes,0);
+  assert.equal(lagged.highWaterEgressBytes,0);
+  assert.equal(lagged.attributedHighWaterEgressBytes,54668);
+  assert.equal(lagged.budgetEgressBytes,54668);
+  assert.equal((await inspect()).usage.budgetEgressBytes,54668);
+  f.state.globalRecords=true;f.state.global=60000;
+  assert.equal((await inspect()).usage.budgetEgressBytes,60000);
+  f.state.global=5000;assert.equal((await inspect()).usage.budgetEgressBytes,60000);
+  f.state.globalRecords=false;
+  assert.equal((await inspect()).meterStatus,'unavailable');
+  assert.equal((await f.grant()).status,503);
+});
+test('the newly observed participant can put the global budget over threshold before issuance',async t=>{
+  const f=setup(t);await f.configure();
+  f.state.personalRecords=true;f.state.personal=400;
+  assert.equal((await f.grant()).status,200);
+  assert.equal((await f.adminRequest('PATCH','quotas/'+f.viewer,{limitBytes:1000})).status,200);
+  f.state.personal=501;
+  // Make the global provider response arrive and persist before the individual one.
+  f.state.beforePersonal=()=>new Promise(resolve=>setTimeout(resolve,10));
+  assert.equal((await f.grant(f.viewer,'viewer')).status,403);
+  assert.equal(f.state.issues.length,1);assert.deepEqual(f.state.revocations,['credential-1']);
+});
+test('another account watermark rising during provider minting prevents delivery of the fresh grant',async t=>{
+  const f=setup(t);await f.configure();
+  f.state.onIssue=async()=>{
+    f.state.personalRecords=true;f.state.personal=901;
+    await f.adminRequest('GET','usage?accountId='+f.viewer);
+  };
+  assert.equal((await f.grant()).status,403);
+  assert.deepEqual(f.state.revocations,['credential-1']);
+  assert.equal(f.sql.prepare("SELECT count(*) AS n FROM relay_leases WHERE state='active'").get().n,0);
 });

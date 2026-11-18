@@ -20,7 +20,7 @@
 
 ## 限额和停用
 
-- 单账号和全局预算都使用十进制 GB，配置上限为 1,000 GB。任一范围的本期供应商出站数据达到其预算的 90%，服务即停发并尝试撤销对应凭据。预算判断保留本期见过的最高出站数。账号未获批、额度或并发数为 0、数据异常、无法检查 TURN Key 归属，均不会获得新凭据。
+- 单账号和全局预算都使用十进制 GB，配置上限为 1,000 GB。任一范围的本期供应商出站数据达到其预算的 90%，服务即停发并尝试撤销对应凭据。个人预算判断保留本期见过的最高出站数。全局预算取供应商全账户高水位与本期各账号高水位之和中的较大值；这两组流量有重叠，不再相加。供应商总览暂时没有记录时，各账号已回读的用量仍参与预算。若总览本期曾有记录但随后变空，服务拒绝签发，直到供应商恢复有效读数。账号未获批、额度或并发数为 0、数据异常、无法检查 TURN Key 归属，均不会获得新凭据。
 - 每个可用凭据最长 120 秒，到期前最后 35 秒可轮换。并发数统计持有凭据的「房间和参与端」组合。Worker 用原子写入保留名额并限制签发和查询频率。同一短期凭据在供应商端仍可能被用于多次 TURN allocation。
 - 紧急停用时，将全局模式设为「关闭」。Worker 先在数据库中停发，再逐批调用提供商撤销 API。读数异常、超额、主动断开、退出登录或管理员暂停账号都会触发相应范围的撤销。供应商暂时不可达时，撤销将保留待重试状态。无法确认的凭据不会再从缓存交付。[签发、轮换和撤销](https://developers.cloudflare.com/realtime/turn/generate-credentials/)
 - Cloudflare Analytics 使用自适应抽样，服务商称用量约在 30 秒后出现。统计和撤销都存在延迟，保护模式无法保证账单严格封顶为 $0 或精确停在某个字节。免费额度由同一 Cloudflare 账号中的 SFU 和 TURN 共享；此处全局数字只覆盖 TURN。若需确保本项目不产生新的公共 TURN 用量，请保持关闭并等待历史凭据全部失效。已发生的费用以供应商账单为准。[计量与抽样](https://developers.cloudflare.com/realtime/turn/replacing-existing/) · [到期和计量延迟](https://developers.cloudflare.com/realtime/turn/faq/) · [共享额度](https://developers.cloudflare.com/realtime/sfu/platform/pricing/) · [Cloudflare 支出控制适用范围](https://developers.cloudflare.com/billing/manage/spend-management/)
