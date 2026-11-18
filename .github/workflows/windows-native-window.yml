@@ -1,0 +1,19 @@
+name: Windows native window acceptance
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native-window:
+    if: github.repository == 'stevenchengxy/cc-connect' && github.ref == 'refs/heads/main'
+    runs-on: windows-2022
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@8f4b7f84864484a7bf31766abe9204da3cbe65b3
+        with:
+          persist-credentials: false
+      - name: Verify release helper in owned Windows form
+        shell: pwsh
+        env:
+          CC_QA_RUNNER_CLASS: ${{ runner.environment }}
+        run: ./scripts/windows-qa/run.ps1
