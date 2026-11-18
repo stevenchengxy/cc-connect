@@ -8,10 +8,13 @@ const SESSION_MS = 12 * 60 * 60_000;
 const DRAIN_MS = 90_000;
 const MAX_PACKET = 160 * 1024;
 const MAX_DIRECTION_BYTES = 2 * 1024 * 1024;
-const MAX_SEQ = 512;
+const MAX_PENDING = 512;
+const MAX_SEQ = 16_384;
+const DIGEST_BYTES = 64; // SHA-256 stored as lowercase hex.
+const PACKETS_PER_MINUTE = 32;
 const TOKEN = /^[A-Za-z0-9_-]{43}$/;
 const HEX_DIGEST = /^[0-9a-f]{64}$/;
-const PATH = /^\/v1\/rooms\/([A-Za-z0-9_-]{43})\/(host|viewer)(?:\/(?:messages\/([1-9]\d{0,2})|(ice)))?$/;
+const PATH = /^\/v1\/rooms\/([A-Za-z0-9_-]{43})\/(host|viewer)(?:\/(?:messages\/([1-9]\d{0,4})|(ice)))?$/;
 const headers = { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' };
 
 function reply(status, body = null) {
@@ -83,21 +86,44 @@ async function boundedBytes(request, limit, minimum) {
 
 async function receive(env, ctx, id, role, token, seq, now, actor) {
   const sender = role === 'host' ? 'viewer' : 'host';
-  // The role is limited to a fixed enum by PATH. One indexed read per idle poll.
-  const row = await env.DB.prepare(`SELECT r.${role} AS auth,r.closed,r.expires,m.bytes,inspection.expires AS next_check FROM rooms r
+  const db = env.DB;
+  // Every shipped client requests N+1 after receiving the complete body of N.
+  // A repeated GET N still receives the same ciphertext if a response was lost.
+  const row = await db.prepare(`SELECT r.closed,r.expires,m.bytes,m.size,m.served,
+    prev.served AS prev_served,prev.size AS prev_size,inspection.expires AS next_check FROM rooms r
     LEFT JOIN messages m ON m.room=r.id AND m.sender=? AND m.seq=?
+    LEFT JOIN messages prev ON prev.room=r.id AND prev.sender=? AND prev.seq=?
     LEFT JOIN auth_rate inspection ON inspection.bucket='relay-inspection' WHERE r.id=? AND ${membership(role)}`)
-    .bind(sender, seq, id, token, actor.id, actor.digest).first();
+    .bind(sender, seq, sender, seq-1, id, token, actor.id, actor.digest).first();
   if (!row || row.expires <= now) return reply(410);
   if (ctx && !row.closed && (row.next_check ?? 0)<=now) ctx.waitUntil(inspectRelayIfDue(env));
-  if (row.bytes != null) return reply(200, new Uint8Array(row.bytes));
-  return reply(row.closed ? 410 : 204);
+  const live = `EXISTS(SELECT 1 FROM rooms r WHERE id=? AND ${membership(role)} AND expires>?)`;
+  const auth = [id, token, actor.id, actor.digest, Date.now()];
+  const changes = [];
+  if (row.prev_served && row.prev_size > 0) {
+    changes.push(db.prepare(`UPDATE messages SET bytes=x'',size=0 WHERE room=? AND sender=? AND seq=?
+      AND served=1 AND size>0 AND ${live}`).bind(id,sender,seq-1,...auth));
+  }
+  if (row.size > 0 && !row.served) {
+    changes.push(db.prepare(`UPDATE messages SET served=1 WHERE room=? AND sender=? AND seq=?
+      AND size>0 AND ${live}`).bind(id,sender,seq,...auth));
+  }
+  if (changes.length) {
+    const results = await db.batch(changes);
+    if (row.size > 0 && !row.served && !results.at(-1).meta.changes) return reply(410);
+  }
+  if (row.size > 0) return reply(200, new Uint8Array(row.bytes));
+  return reply(row.closed || row.size === 0 ? 410 : 204);
 }
 
 async function submit(db, request, id, role, token, seq, now, actor) {
   if (request.headers.get('content-type')?.split(';')[0].toLowerCase() !== 'application/octet-stream') return reply(415);
-  const room = await db.prepare(`SELECT closed,expires FROM rooms r WHERE id=? AND ${membership(role)}`).bind(id, token, actor.id, actor.digest).first();
+  const room = await db.prepare(`SELECT closed,expires,created FROM rooms r WHERE id=? AND ${membership(role)}`).bind(id, token, actor.id, actor.digest).first();
   if (!room || room.closed || room.expires <= now) return reply(410);
+  // Keep the original burst allowance and grow the lifetime work allowance at
+  // a bounded rate for long media sessions. Replays stay at their existing seq.
+  const budget = MAX_PENDING + Math.floor(Math.max(0,now-room.created) * PACKETS_PER_MINUTE / 60_000);
+  if (seq > budget) return reply(429);
   const bytes = await boundedBytes(request, MAX_PACKET, 50);
   if (!bytes) return reply(413);
   const digest = await fingerprint(bytes);
@@ -105,10 +131,14 @@ async function submit(db, request, id, role, token, seq, now, actor) {
   const result = await db.prepare(`INSERT OR IGNORE INTO messages(room,sender,seq,bytes,size,digest)
     SELECT ?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM rooms r WHERE id=? AND ${membership(role)} AND expires>? AND closed=0 AND viewer IS NOT NULL)
     AND ?=(SELECT coalesce(max(seq),0)+1 FROM messages WHERE room=? AND sender=?)
-    AND ?+(SELECT coalesce(sum(size),0) FROM messages WHERE room=? AND sender=?)<=?`)
-    .bind(id, role, seq, bytes.buffer, bytes.length, digest, id, token, actor.id, actor.digest, Date.now(), seq, id, role, bytes.length, id, role, MAX_DIRECTION_BYTES).run();
+    AND EXISTS(SELECT 1 FROM (SELECT count(*) AS pending,coalesce(sum(size),0) AS outstanding
+      FROM messages WHERE room=? AND sender=? AND size>0) WHERE pending<? AND outstanding+?<=?)`)
+    .bind(id, role, seq, bytes.buffer, bytes.length, digest, id, token, actor.id, actor.digest, Date.now(), seq, id, role,
+      id, role, MAX_PENDING, bytes.length + seq*DIGEST_BYTES, MAX_DIRECTION_BYTES).run();
   if (result.meta.changes > 0) return reply(204);
-  const old = await db.prepare('SELECT digest FROM messages WHERE room=? AND sender=? AND seq=?').bind(id, role, seq).first();
+  const old = await db.prepare(`SELECT m.digest FROM messages m JOIN rooms r ON r.id=m.room
+    WHERE m.room=? AND m.sender=? AND m.seq=? AND r.closed=0 AND r.expires>? AND ${membership(role)}`)
+    .bind(id, role, seq, Date.now(), token, actor.id, actor.digest).first();
   return reply(old?.digest === digest ? 204 : 409);
 }
 
@@ -146,7 +176,8 @@ async function handle(request, env, ctx) {
     return reply(204);
   }
   const seq = Number(sequence);
-  if (seq > MAX_SEQ) return reply(429);
+  // An idle reader can acknowledge the final allowed packet and keep the room alive.
+  if (seq > MAX_SEQ + (request.method === 'GET' ? 1 : 0)) return reply(429);
   if (request.method === 'GET') return receive(env, ctx, id, role, token, seq, now, actor);
   if (request.method === 'PUT') return submit(env.DB, request, id, role, token, seq, now, actor);
   return reply(405);

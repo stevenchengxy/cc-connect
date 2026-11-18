@@ -1,3 +1,4 @@
+import { sql } from 'drizzle-orm';
 import { sqliteTable, text, integer, blob, index, primaryKey, uniqueIndex } from 'drizzle-orm/sqlite-core';
 
 export const invites = sqliteTable('account_invites', {
@@ -58,8 +59,10 @@ export const messages = sqliteTable('messages', {
   seq: integer('seq').notNull(),
   bytes: blob('bytes').notNull(),
   size: integer('size').notNull(),
-  digest: text('digest').notNull()
-}, t => [primaryKey({ columns:[t.room,t.sender,t.seq] })]);
+  digest: text('digest').notNull(),
+  served: integer('served').notNull().default(0)
+}, t => [primaryKey({ columns:[t.room,t.sender,t.seq] }),
+  index('messages_pending').on(t.room,t.sender,t.seq).where(sql`size > 0`)]);
 
 // One short-lived credential cache entry and one issuance lease per member.
 export const turnGrants = sqliteTable('turn_grants', {

@@ -76,3 +76,60 @@ test('pre-upgrade rooms cannot be claimed with a new account or used for TURN', 
   }),env);
   assert.equal(ice.status,403);
 });
+
+test('next pull acknowledges only previously served packets and keeps duplicate writes idempotent', async t => {
+  const db=database(t), r=fixture(db), packet=randomBytes(160), other=randomBytes(160);
+  await r.send('host','POST');await r.send('viewer','POST');
+  await r.send('host','PUT',1,undefined,packet);
+  // A speculative read ahead must not destroy a packet that was never delivered.
+  assert.equal((await r.send('viewer','GET',2)).status,204);
+  assert.deepEqual(Buffer.from(await (await r.send('viewer','GET',1)).arrayBuffer()),packet);
+  assert.deepEqual(Buffer.from(await (await r.send('viewer','GET',1)).arrayBuffer()),packet);
+  assert.equal((await r.send('viewer','GET',2,r.hostToken)).status,410);
+  assert.equal(db.handle.prepare('SELECT size FROM messages WHERE room=? AND sender=? AND seq=1').get(r.id,'host').size,packet.length);
+  await r.send('viewer','GET',2);
+  assert.equal(db.handle.prepare('SELECT length(bytes) AS n FROM messages WHERE room=? AND sender=? AND seq=1').get(r.id,'host').n,0);
+  assert.equal((await r.send('viewer','GET',1)).status,410);
+  const retry = await Promise.all([
+    r.send('host','PUT',1,undefined,packet), r.send('host','PUT',1,undefined,other),
+    r.send('host','PUT',2,undefined,other), r.send('host','PUT',2,undefined,other)
+  ]);
+  assert.deepEqual(retry.map(resp=>resp.status),[204,409,204,204]);
+  assert.deepEqual(Buffer.from(await (await r.send('viewer','GET',2)).arrayBuffer()),other);
+});
+
+test('long bidirectional sessions reclaim delivered ciphertext across large cumulative byte and sequence counts', async t => {
+  const db=database(t),r=fixture(db), packet=randomBytes(4096);
+  await r.send('host','POST');await r.send('viewer','POST');
+  db.handle.prepare('UPDATE rooms SET created=? WHERE id=?').run(Date.now()-10*3600000,r.id);
+  for (let seq=1;seq<=1200;seq++) {
+    for (const role of ['host','viewer']) {
+      assert.equal((await r.send(role,'PUT',seq,undefined,packet)).status,204);
+      const response=await r.send(role==='host'?'viewer':'host','GET',seq);
+      assert.equal(response.status,200);assert.equal((await response.arrayBuffer()).byteLength,packet.length);
+    }
+  }
+  await r.send('host','GET',1201);await r.send('viewer','GET',1201);
+  const totals=db.handle.prepare('SELECT sender,count(*) AS receipts,sum(length(bytes)) AS live FROM messages GROUP BY sender').all();
+  assert(totals.every(row=>row.live===0 && row.receipts===1200));
+  assert.equal((await r.send('host','PUT',17,undefined,packet)).status,204);
+});
+
+test('limits unacknowledged data, write rate and absolute work without allowing out-of-order or duplicate admission', async t => {
+  const db=database(t),r=fixture(db), packet=randomBytes(80);
+  await r.send('host','POST');await r.send('viewer','POST');
+  db.handle.prepare('UPDATE rooms SET created=? WHERE id=?').run(Date.now()-5*3600000,r.id);
+  for (let seq=1;seq<=512;seq++) assert.equal((await r.send('host','PUT',seq,undefined,packet)).status,204);
+  assert.equal((await r.send('host','PUT',513,undefined,packet)).status,409);
+  await r.send('viewer','GET',1);await r.send('viewer','GET',2);
+  assert.equal((await r.send('host','PUT',513,undefined,packet)).status,204);
+  db.handle.prepare('UPDATE rooms SET created=? WHERE id=?').run(Date.now(),r.id);
+  assert.equal((await r.send('host','PUT',514,undefined,packet)).status,429);
+  const large=randomBytes(160*1024);
+  for (let i=1;i<=12;i++) assert.equal((await r.send('viewer','PUT',i,undefined,large)).status,204);
+  assert.equal((await r.send('viewer','PUT',13,undefined,large)).status,409);
+  await r.send('host','GET',1);await r.send('host','GET',2);
+  assert.equal((await r.send('viewer','PUT',13,undefined,large)).status,204);
+  assert.equal((await r.send('viewer','PUT',16385,undefined,packet)).status,429);
+  assert.equal((await r.send('viewer','GET',16385)).status,204);
+});

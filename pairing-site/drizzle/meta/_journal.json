@@ -36,6 +36,13 @@
       "when": 1795007790102,
       "tag": "0004_relay_daily_meter",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1795009203443,
+      "tag": "0005_acknowledged_signaling",
+      "breakpoints": true
     }
   ]
 }
