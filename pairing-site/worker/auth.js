@@ -3,6 +3,8 @@ import { periodAt } from './usage-provider.js';
 import { closeSessionRelay, revokeAccountRelay, usageAdmin } from './usage.js';
 
 const TOKEN = /^[A-Za-z0-9_-]{43}$/;
+const INVITE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
+const SHORT_INVITE = /^[2-9A-HJ-NP-Z]{8}$/i;
 const USERNAME = /^[a-z0-9][a-z0-9_.-]{2,39}$/i;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const DAY = 86_400_000;
@@ -22,6 +24,14 @@ export async function fingerprint(value) {
 
 function secret() {
   return btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))).replaceAll('+','-').replaceAll('/','_').replace(/=+$/,'');
+}
+
+function registrationInvite(value) {
+  if (typeof value !== 'string') return null;
+  const text = value.trim();
+  if (TOKEN.test(text)) return text;
+  const compact = text.replace(/[\s-]/g,'');
+  return SHORT_INVITE.test(compact) ? compact.toUpperCase() : null;
 }
 
 function equalDigest(left, right) {
@@ -71,7 +81,7 @@ function profile(row) {
 
 // Only the platform-provided address is considered. Fixed windows and an indexed expiry
 // let the service discard source and username fingerprints without storing addresses.
-async function rate(db, key, max, now, window = 15*60_000) {
+export async function rate(db, key, max, now, window = 15*60_000) {
   const epoch = Math.floor(now/window);
   const bucket = await fingerprint('auth-limit|' + key + '|' + epoch);
   const result = await db.prepare(`INSERT INTO auth_rate(bucket,attempts,expires)
@@ -114,9 +124,9 @@ async function createAccount(request, env, kind, now) {
   const db = env.DB;
   if (!await entryAllowed(request,db,kind,fields.username,now)) return authError(429,'rate_limited');
   const setup = kind === 'bootstrap';
-  const input = setup ? data.bootstrap : data.invite;
+  const input = setup ? data.bootstrap : registrationInvite(data.invite);
   const reject = () => authError(403,'registration_unavailable');
-  if (typeof input !== 'string' || !TOKEN.test(input)) return reject();
+  if (typeof input !== 'string' || (setup && !TOKEN.test(input))) return reject();
   const digest = await fingerprint(input);
   if (setup) {
     if (!equalDigest(digest,env.CC_ADMIN_BOOTSTRAP_SHA256) ||
@@ -169,12 +179,21 @@ async function logout(env, actor) {
 }
 
 async function invite(env,now) {
-  const raw = secret(), expires = now+DAY;
-  const [,result] = await env.DB.batch([
-    env.DB.prepare('DELETE FROM account_invites WHERE expires<=?').bind(now),
-    env.DB.prepare('INSERT INTO account_invites(digest,expires) SELECT ?,? WHERE (SELECT count(*) FROM account_invites)<256').bind(await fingerprint(raw),expires)
-  ]);
-  return result.meta.changes ? json(201,{invite:raw,expiresAt:seconds(expires)}) : authError(429,'invite_limit');
+  const db = env.DB, expires = now + DAY;
+  await db.prepare('DELETE FROM account_invites WHERE expires<=?').bind(now).run();
+  for (let attempt = 0; attempt < 3; attempt++) {
+    // A 32-character alphabet gives each symbol exactly five random bits.
+    const raw = Array.from(crypto.getRandomValues(new Uint8Array(8)), byte => INVITE_ALPHABET[byte & 31]).join('');
+    const digest = await fingerprint(raw);
+    const result = await db.prepare(`INSERT OR IGNORE INTO account_invites(digest,expires)
+      SELECT ?,? WHERE (SELECT count(*) FROM account_invites)<256 AND NOT EXISTS(SELECT 1 FROM accounts WHERE invite=?)`)
+      .bind(digest,expires,digest).run();
+    if (result.meta.changes) return json(201,{invite:raw.slice(0,4)+'-'+raw.slice(4),expiresAt:seconds(expires)});
+    if ((await db.prepare('SELECT count(*) AS total FROM account_invites').first()).total >= 256) {
+      return authError(429,'invite_limit');
+    }
+  }
+  return authError(503,'invite_unavailable');
 }
 
 async function listAccounts(url,env,now) {

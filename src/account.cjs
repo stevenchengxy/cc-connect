@@ -37,8 +37,11 @@ function credentials(values, registration) {
     throw new Error('请输入 12 至 128 位密码。')
   }
   if (!registration) return { username, password }
-  if (typeof values.invite !== 'string' || !validToken(values.invite.trim())) throw new Error('请填写管理员提供的邀请码。')
-  return { username, password, invite: values.invite.trim() }
+  const invite = typeof values.invite === 'string' ? values.invite.trim() : ''
+  if (validToken(invite)) return { username, password, invite }
+  const compact = invite.replace(/[\s-]/g,'')
+  if (!/^[2-9A-HJ-NP-Z]{8}$/i.test(compact)) throw new Error('请填写管理员提供的邀请码。')
+  return { username, password, invite: compact.toUpperCase() }
 }
 
 class DesktopAccount {

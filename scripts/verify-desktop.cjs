@@ -33,15 +33,6 @@ async function observeInternetConnection(page) {
   }, publicIceOnly)
 }
 
-function internetInvite(invite) {
-  const data = JSON.parse(Buffer.from(invite.slice(4), 'base64url').toString('utf8'))
-  assert.equal(data.managed, 1, 'Public pairing service did not register the host')
-  delete data.ips
-  delete data.port
-  delete data.pin
-  return 'RD1.' + Buffer.from(JSON.stringify(data)).toString('base64url')
-}
-
 async function verifyInternetConnection(page) {
   const {usesStun, remoteType, state} = await page.evaluate(async () => {
     const pc = window.testPeerConnection
@@ -91,7 +82,11 @@ async function run() {
         if (fixture) await page.locator('#account-switch').click()
         await page.locator('#account-username').fill(username)
         await page.locator('#account-password').fill(password)
-        if (fixture) await page.locator('#register-invite').fill(await fixture.invite())
+        if (fixture) {
+          const invite = await fixture.invite()
+          assert.match(invite, /^[2-9A-HJ-NP-Z]{4}-[2-9A-HJ-NP-Z]{4}$/)
+          await page.locator('#register-invite').fill(name === 'host' ? invite.toLowerCase().replace('-', '') : invite)
+        }
         await page.locator('#account-submit').click()
         if (fixture) {
           await page.locator('#account-refresh').waitFor({state:'visible'})
@@ -212,17 +207,38 @@ async function run() {
       await setCaptureQA({listFails:false})
     }
     await host.locator('#host-tab').click()
-    async function pair() {
+    async function readCopiedCode(predicate) {
+      for (let attempt = 0; attempt < 50; attempt++) {
+        const value = await apps[0].evaluate(({session}) => session.defaultSession.qaCopiedText)
+        if (typeof value === 'string' && predicate(value)) return value
+        await delay(50)
+      }
+      throw Error('The copy action did not deliver the expected invitation to the test clipboard')
+    }
+    async function pair(copyCompatible = false) {
       await host.locator('#host-button').click()
       await host.locator('#host-invite').waitFor({ state: 'visible' })
-      const invite = await host.locator('#host-invite').inputValue()
-      assert(invite.startsWith('RD1.'))
-      await viewer.locator('#invite-input').fill(wan ? internetInvite(invite) : invite)
+      const shortCode = await host.locator('#host-invite').inputValue()
+      assert.match(shortCode, /^[2-9A-HJ-NP-Z]{4}-[2-9A-HJ-NP-Z]{4}-[2-9A-HJ-NP-Z]{4}$/)
+      let invite = shortCode
+      if (copyCompatible) {
+        await host.locator('#copy-button').click()
+        await readCopiedCode(value => value === shortCode)
+        await host.getByRole('button', {name:/旧版|兼容/}).click()
+        invite = await readCopiedCode(value => value.startsWith('RD1.'))
+        const legacy = JSON.parse(Buffer.from(invite.slice(4), 'base64url'))
+        const {normalizePairCode, pairSecret} = require('../src/pair-code.cjs')
+        const key = await pairSecret(normalizePairCode(shortCode))
+        assert(legacy.key === key.toString('base64url'), 'Both copy actions must refer to one host invitation')
+      }
+      await viewer.locator('#invite-input').fill(invite)
       await viewer.locator('#join-button').click()
       await host.locator('#consent[open]').waitFor()
+      assert.equal(await host.locator('#host-invite').isVisible(), false, 'A claimed code must no longer be offered for copying')
+      assert.equal(await viewer.locator('#invite-input').inputValue(), '', 'A claimed code must not be reused on reconnection')
       assert.equal(await host.locator('#allow-control').isChecked(), false)
     }
-    await pair()
+    await pair(!!fixture)
     await host.locator('#reject').click()
     await viewer.waitForFunction(() => document.getElementById('top-status').textContent === '待连接')
     if (localCaptureQA && pickerSupported) {

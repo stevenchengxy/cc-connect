@@ -83,7 +83,7 @@
         <div id="view-panel" role="tabpanel" aria-labelledby="view-tab">
           <form id="join-form">
             <label for="invite-input" class="field-title" data-i18n="对方的配对码">对方的配对码</label>
-            <input id="invite-input" type="text" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="粘贴对方从「共享此机」生成的配对码" data-i18n-placeholder="粘贴对方从「共享此机」生成的配对码" maxlength="8192" required>
+            <input id="invite-input" type="text" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="输入或粘贴配对码" data-i18n-placeholder="输入或粘贴配对码" maxlength="4096" required>
             <button class="primary full" id="join-button" type="submit"><span data-i18n="连接设备">连接设备</span><svg><use href="#i-arrow"/></svg></button>
           </form>
         </div>
@@ -91,6 +91,7 @@
           <h2 class="field-title" data-i18n="本机的配对码">本机的配对码</h2>
           <p class="field-help" id="host-help" hidden></p>
           <div id="invite-box" hidden><input id="host-invite" readonly aria-label="本机配对码" data-i18n-aria-label="本机配对码"><button id="copy-button" type="button" class="icon-button" title="复制配对码" data-i18n-title="复制配对码" aria-label="复制配对码" data-i18n-aria-label="复制配对码"><svg><use href="#i-copy"/></svg></button></div>
+          <button class="text-button" id="copy-legacy" type="button" data-i18n="为旧版复制兼容码" hidden>为旧版复制兼容码</button>
           <button class="primary full" id="host-button" type="button"><span data-i18n="生成配对码">生成配对码</span><svg><use href="#i-arrow"/></svg></button>
           <button class="secondary full" id="cancel-host" type="button" hidden data-i18n="取消邀请">取消邀请</button>
         </div>

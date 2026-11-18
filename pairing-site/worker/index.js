@@ -1,4 +1,4 @@
-import { accessError, accountRoutes, authenticate, fingerprint } from './auth.js';
+import { accessError, accountRoutes, authenticate, fingerprint, rate } from './auth.js';
 import { closeRoomRelay, managedIce, inspectRelayIfDue } from './usage.js';
 
 // Only invitation-key holders can complete the endpoint-to-endpoint challenge.
@@ -51,11 +51,22 @@ async function register(db, request, id, role, token, now, actor) {
     return reply(room.host === token && room.host_account === actor.id && room.host_session === actor.digest && room.enrollment === proof ? 200 : 409);
   }
   if (!TOKEN.test(proof)) return reply(400);
+  // Apply admission limits before looking up the room, so successful guesses
+  // cannot be distinguished from failures after the requester reaches its limit.
+  const source = request.headers.get('cf-connecting-ip') || 'local';
+  await db.prepare('DELETE FROM auth_rate WHERE bucket IN (SELECT bucket FROM auth_rate WHERE expires<=? LIMIT 8)').bind(now).run();
+  if (!await rate(db, 'pair-viewer-account|' + actor.id, 15, now, 60_000) ||
+      !await rate(db, 'pair-viewer-ip|' + source, 90, now, 60_000)) return reply(429);
   const enrollment = await fingerprint(proof);
-  const room = await db.prepare(`SELECT enrollment,viewer,viewer_account,viewer_session,closed,expires FROM rooms r WHERE id=? AND ${membersLive}`).bind(id).first();
+  const room = await db.prepare(`SELECT enrollment,viewer,viewer_account,viewer_session,closed,created,expires FROM rooms r WHERE id=? AND ${membersLive}`).bind(id).first();
   if (!room) return reply(404);
   if (room.enrollment !== enrollment) return reply(403);
-  if (room.closed || room.expires <= now) return reply(410);
+  if (room.closed || room.expires <= now) {
+    let state = 'expired';
+    if (room.viewer) state = 'used';
+    else if (room.closed && room.created + WAIT_MS > now) state = 'closed';
+    return new Response(null, { status: 410, headers: { ...headers, 'x-cc-invite-state': state } });
+  }
   if (room.viewer) return reply(room.viewer === token && room.viewer_account === actor.id && room.viewer_session === actor.digest ? 200 : 409);
   const result = await db.prepare(`UPDATE rooms AS r SET viewer=?, expires=?, viewer_account=?, viewer_session=? WHERE id=? AND enrollment=?
       AND viewer IS NULL AND closed=0 AND expires>? AND ${membersLive} AND ${liveSession('?','?')}`)

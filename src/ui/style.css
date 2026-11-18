@@ -161,7 +161,8 @@ input:not([type="checkbox"]):focus,select:focus-visible { border-color: #637e9e;
 #quality-select { appearance: none; border-radius: 10px; color: #293c53; padding: 4px 30px 4px 11px; font-size: 13px; min-height: 33px; background: rgb(255 255 255 / 68%); }
 #quality-detail { font-size: 11px; white-space: nowrap; }
 #invite-box { display: flex; align-items: center; gap: 9px; }
-#invite-box input { font: 12px "SFMono-Regular",Consolas,monospace; }
+#invite-box input { min-width: 0; font: 600 clamp(15px, 2vw, 21px) "SFMono-Regular",Consolas,monospace; letter-spacing: .035em; }
+#copy-legacy { margin-top: 5px; font-size: 12px; }
 #copy-button { height: 43px; width: 43px; flex-shrink: 0; }
 #waiting { display: flex; align-items: center; gap: 8px; margin-top: 13px; color: var(--muted); font-size: 13px; }
 .text-button { background: none; border: 0; padding: 4px; color: #325980; }

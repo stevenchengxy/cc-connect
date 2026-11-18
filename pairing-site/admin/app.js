@@ -113,7 +113,16 @@ $('login-form').onsubmit=e=>{e.preventDefault();if(busy)return;busy=true;const f
 $('logout').onclick=()=>action($('logout'),async()=>{try{await api('auth/logout','POST');}finally{clear();}});
 $('refresh').onclick=()=>action($('refresh'),()=>refresh());$('more').onclick=()=>action($('more'),()=>refresh(true));$('filter').onchange=()=>{cursor=null;accounts=[];render();void refresh().catch(e=>notice(labels[e.message]?e.message:'failed'));};
 $('edit-global').onclick=()=>action($('edit-global'),async()=>{const info=await api('admin/usage');quotaForm(dialog(t('quotaSettings')),info,'global');});
-$('invite').onclick=()=>action($('invite'),async()=>{const r=await api('admin/invites','POST');const body=dialog(t('invite')),box=element('input');box.readOnly=true;box.value=r.invite;box.setAttribute('aria-label',t('invite'));body.append(box,element('p',t('expires')+' '+new Date(r.expiresAt*1000).toLocaleString(locale)+' · '+t('singleUse'),'fine'),btn('copy',async()=>{await navigator.clipboard.writeText(box.value);notice('copied',true);}));});
+$('invite').onclick=()=>action($('invite'),async()=>{
+  const r=await api('admin/invites','POST');
+  const body=dialog(t('invite')),box=element('input',undefined,'invite-code');
+  box.readOnly=true;
+  box.value=r.invite;
+  box.setAttribute('aria-label',t('invite'));
+  box.onclick=()=>box.select();
+  body.append(box,element('p',t('expires')+' '+new Date(r.expiresAt*1000).toLocaleString(locale)+' · '+t('singleUse'),'fine'),
+    btn('copy',async()=>{await navigator.clipboard.writeText(box.value);notice('copied',true);}));
+});
 $('details').addEventListener('close',()=>{detailVersion++;$('dialog-body').replaceChildren();notice('',true);});
 $('lang').onchange=()=>{locale=$('lang').value;localStorage.setItem('cc.admin.language',locale);$('details').close();localize();};
 localize();

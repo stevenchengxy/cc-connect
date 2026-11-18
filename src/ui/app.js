@@ -21,6 +21,7 @@ let generation = 0;
 let room = null;
 let peerName = '';
 let pendingRequest = null;
+let legacyInvite = '';
 let settingsCheck = null;
 let expiryTimer;
 let joinTimer;
@@ -208,8 +209,9 @@ function syncHome() {
   $('join-button').disabled = !canPair;
   $('host-button').disabled = !canPair;
   $('host-button').hidden = inviting;
-  $('invite-box').hidden = !inviting;
-  $('cancel-host').hidden = !inviting;
+  $('invite-box').hidden = phase !== 'listening';
+  $('copy-legacy').hidden = phase !== 'listening' || !legacyInvite;
+  $('cancel-host').hidden = phase !== 'listening';
   $('waiting').hidden = phase !== 'joining';
   $('settings-button').disabled = phase === 'request';
   $('settings-end').hidden = phase !== 'session';
@@ -266,6 +268,7 @@ function backHome(message, error = false) {
   if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
   phase = 'idle';
   peerName = '';
+  legacyInvite = '';
   $('host-invite').value = '';
   $('host-help').hidden = true;
   $('session').hidden = true;
@@ -313,7 +316,12 @@ $('join-form').onsubmit = async (event) => {
   joinTimer = setTimeout(() => {
     if (generation === token && phase === 'joining') void disconnect('等待时间已到，请确认对方仍在等待配对。', true);
   }, 120_000);
-  try { await api.join(invite); }
+  try {
+    await api.join(invite);
+    // Registration has claimed this one-use invitation, even if the host
+    // later declines or the connection closes without a video frame.
+    if (generation === token && $('invite-input').value.trim() === invite) $('invite-input').value = '';
+  }
   catch (e) { if (generation === token) await disconnect(describeError(e), true); }
 };
 $('host-button').onclick = async () => {
@@ -322,9 +330,11 @@ $('host-button').onclick = async () => {
   phase = 'opening';
   syncHome(); notice('home-notice'); setStatus('正在创建邀请', 'pending');
   try {
-    const { invite, expiresAt, internetAvailable, internetIssue } = await api.host();
+    const { invite, legacyInvite: compatibilityCode, expiresAt, internetAvailable, internetIssue } = await api.host();
     if (generation !== token) return;
     if (phase === 'opening') phase = 'listening';
+    if (phase !== 'listening') return;
+    legacyInvite = compatibilityCode || '';
     $('host-invite').value = invite;
     if (internetIssue) notice('home-notice', internetIssue, true);
     const expires = new Date(expiresAt).getTime();
@@ -337,7 +347,9 @@ $('host-button').onclick = async () => {
       const seconds = Math.ceil((expires - Date.now()) / 1000);
       if (seconds <= 0) {
         clearInterval(expiryTimer);
-        if (phase === 'listening') void disconnect('配对码已过期。请生成新的配对码。');
+        // The pairing process owns expiry. Its consent event may already be
+        // in flight when this display-only countdown reaches zero.
+        $('host-help').textContent = t('配对码已过期。请生成新的配对码。');
       } else {
         const lifetime = t('剩余 {time} 有效', {time: Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0')});
         $('host-help').textContent = internetAvailable === false
@@ -356,10 +368,13 @@ $('host-button').onclick = async () => {
 $('cancel-join').onclick = () => disconnect('已取消配对。');
 $('cancel-host').onclick = () => disconnect('邀请已取消。');
 $('end-session').onclick = () => disconnect('连接已结束。');
-$('copy-button').onclick = async () => {
-  try { await api.copy($('host-invite').value); notice('home-notice', '配对码已复制。'); }
+async function copyInvite(value) {
+  if (phase !== 'listening' || !value) return;
+  try { await api.copy(value); if (phase === 'listening') notice('home-notice', '配对码已复制。'); }
   catch (e) { notice('home-notice', describeError(e), true); }
-};
+}
+$('copy-button').onclick = () => copyInvite($('host-invite').value);
+$('copy-legacy').onclick = () => copyInvite(legacyInvite);
 $('host-invite').onclick = (e) => e.target.select();
 
 $('settings-end').onclick = () => { closeSettings(); void disconnect(); };
@@ -477,6 +492,10 @@ async function requestConsent(event) {
   if (!['listening','opening'].includes(phase)) return;
   expandIsland(false);
   if ($('settings-dialog').open) closeSettings();
+  clearInterval(expiryTimer);
+  legacyInvite = '';
+  $('host-invite').value = '';
+  $('host-help').hidden = true;
   phase = 'request'; syncHome();
   pendingRequest = {id:event.requestId, generation, busy:false};
   peerName = event.name || t('远端设备');

@@ -1,9 +1,11 @@
 // A visible test window supplies an animated synthetic source. Always replace
 // the capture target here so the integration test never reads the user's desktop.
-const { app, BrowserWindow, desktopCapturer, session, screen, systemPreferences, safeStorage } = require('electron')
+const { app, BrowserWindow, clipboard, desktopCapturer, session, screen, systemPreferences, safeStorage } = require('electron')
 const path = require('node:path')
 app.whenReady().then(async () => {
   const ses = session.defaultSession
+  // Both test windows use an in-memory clipboard; the host OS clipboard is private.
+  clipboard.writeText = value => { ses.qaCopiedText = value }
   const fixture = process.env.CC_QA_ACCOUNT_ORIGIN
   if (fixture) {
     const origin = new URL(fixture)

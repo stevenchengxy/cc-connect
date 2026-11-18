@@ -239,7 +239,11 @@ test('public registration errors distinguish access denial, invite state and ove
   for (const [status, headers, expected] of [
     [403, {'content-type': 'text/html'}, /拒绝了此次网络访问/],
     [403, {}, /配对码验证失败/], [404, {}, /找不到/],
-    [409, {}, /已被使用/], [410, {}, /结束或过期/], [429, {}, /暂时繁忙/]
+    [409, {}, /已被使用/], [410, {}, /结束或过期/],
+    [410, {'x-cc-invite-state':'used'}, /已被使用/],
+    [410, {'x-cc-invite-state':'closed'}, /已结束这份邀请/],
+    [410, {'x-cc-invite-state':'expired'}, /公网邀请已过期/],
+    [429, {}, /同一个配对码重试/]
   ]) {
     const network = new PairingNetwork({
       managedUrl: 'https://pair.example/v1', fetchImpl: async () => new Response(null, {status, headers})
@@ -284,13 +288,14 @@ test('approved-account desktop enrolls both roles only via the official API and 
   assert.throws(()=>new PairingNetwork({...fixture,accountOnly:true}),/登录/);
   const host=get('host'), viewer=get('viewer');
   t.after(()=>{host.stop(); viewer.stop();});
-  const {invite} = await host.host({relayUrl:'wss://ignored.invalid',address:'127.0.0.1'});
-  const spec=JSON.parse(Buffer.from(invite.slice(4),'base64url'));
+  const {invite,legacyInvite} = await host.host({relayUrl:'wss://ignored.invalid',address:'127.0.0.1'});
+  assert.match(invite,/^[2-9A-HJ-NP-Z]{4}-[2-9A-HJ-NP-Z]{4}-[2-9A-HJ-NP-Z]{4}$/);
+  const spec=JSON.parse(Buffer.from(legacyInvite.slice(4),'base64url'));
   assert.deepEqual(Object.keys(spec).sort(),['account','exp','key','managed']);
   assert(!Object.values(spec).includes(tokens.host)); assert(!host.state.server);
-  await assert.rejects(viewer.join({invite:change(invite,{account:undefined})}),/两端升级/);
+  await assert.rejects(viewer.join({invite:change(legacyInvite,{account:undefined})}),/两端升级/);
   const request=next(host,'request');
-  await viewer.join({invite,name:'Approved'});
+  await viewer.join({invite:invite.replaceAll('-',' ').toLowerCase(),name:'Approved'});
   await request;
   const accepted=next(viewer,'connected');
   host.respond(true); assert.equal((await accepted).managedWan,true);
@@ -299,6 +304,20 @@ test('approved-account desktop enrolls both roles only via the official API and 
     Response.json({error:'account_suspended'},{status:403})});
   await assert.rejects(blocked.host({address:'127.0.0.1'}),/已停用/);
   assert.equal(blocked.state,null);
+});
+
+test('an account-bound legacy invitation still reaches the same host consent flow', async t => {
+  const fixture = managedFixture();
+  const peer = () => new PairingNetwork({...fixture, accountOnly:true, accountToken:randomBytes(32).toString('base64url')});
+  const host = peer(), viewer = peer();
+  t.after(() => { viewer.stop(); host.stop(); });
+  const {legacyInvite} = await host.host();
+  const request = next(host,'request');
+  await viewer.join({invite:legacyInvite, name:'Compatible viewer'});
+  assert.equal((await request).name,'Compatible viewer');
+  const connected = next(viewer,'connected');
+  host.respond(true);
+  assert.equal((await connected).managedWan,true);
 });
 
 test('managed relay grants refresh before expiry and disappear when renewal is denied', async () => {

@@ -10,6 +10,7 @@ const WebSocket = require('ws');
 const forge = require('node-forge');
 const { Mailbox } = require('./managed-mailbox.cjs');
 const { validToken, messages } = require('./account.cjs');
+const { makePairCode, normalizePairCode, formatPairCode, pairSecret } = require('./pair-code.cjs');
 
 const INVITE_PREFIX = 'RD1.';
 const LIFETIME = 10 * 60 * 1000;
@@ -229,9 +230,14 @@ class PairingNetwork extends EventEmitter {
   }
 
   async host({ name, address, relayUrl } = {}) {
-    const spec = { key: b64(crypto.randomBytes(32)), exp: Date.now() + LIFETIME };
-    const s = this.begin('host', name, Buffer.from(spec.key, 'base64url'));
+    const code = this.accountOnly ? makePairCode() : null;
+    const s = this.begin('host', name, code ? null : crypto.randomBytes(32));
     try {
+      if (code) {
+        s.secret = await pairSecret(code);
+        this.live(s);
+      }
+      const spec = { key: b64(s.secret), exp: Date.now() + LIFETIME };
       if (this.accountOnly) {
         spec.account = 1;
         spec.managed = 1;
@@ -260,7 +266,9 @@ class PairingNetwork extends EventEmitter {
         } else Object.assign(spec, await direct);
       }
       s.expires = setTimeout(() => this.end(s, '邀请已过期。'), Math.max(1, spec.exp - Date.now()));
-      return { invite: INVITE_PREFIX + b64(Buffer.from(JSON.stringify(spec))), expiresAt: spec.exp, internetAvailable: !!(spec.relay || spec.managed), internetIssue: s.internetIssue };
+      const longInvite = INVITE_PREFIX + b64(Buffer.from(JSON.stringify(spec)));
+      return { invite: code ? formatPairCode(code) : longInvite, ...(code && {legacyInvite: longInvite}),
+        expiresAt: spec.exp, internetAvailable: !!(spec.relay || spec.managed), internetIssue: s.internetIssue };
     } catch (err) { this.end(s, '', false); throw err; }
   }
 
@@ -295,15 +303,20 @@ class PairingNetwork extends EventEmitter {
   }
 
   async join({ invite, name, relayUrl } = {}) {
-    const spec = invitation(invite);
+    const code = this.accountOnly ? normalizePairCode(invite) : null;
+    const spec = code ? { account: 1, managed: 1 } : invitation(invite);
     if (this.accountOnly && (spec.account !== 1 || spec.managed !== 1 || spec.relay || spec.ips)) {
       throw new Error('请将两端升级至 0.4.0 或更高版本，并重新生成配对码。');
     }
     if (spec.relay && (!relayUrl || relayURL(relayUrl) !== spec.relay)) {
       throw new Error('这是一份跨网邀请。请先在两端配置相同且受信任的 wss:// 信令地址。');
     }
-    const s = this.begin('viewer', name, Buffer.from(spec.key, 'base64url'));
+    const s = this.begin('viewer', name, code ? null : Buffer.from(spec.key, 'base64url'));
     try {
+      if (code) {
+        s.secret = await pairSecret(code);
+        this.live(s);
+      }
       let ws;
       if (this.accountOnly) ws = await this.mailbox(s);
       else if (spec.relay) ws = await dial(s, rendezvous(spec, 'viewer'));
@@ -380,6 +393,9 @@ class PairingNetwork extends EventEmitter {
     }
     if (s.role === 'host' && !s.peer && p.phase === 'proof' && msg.op === 'proof' && msg.value === p.challenge) {
       s.peer = p;
+      // The authenticated viewer has claimed the invitation. Local approval
+      // now has its own deadline, even when pairing began close to expiry.
+      clearTimeout(s.expires);
       s.server?.close();
       p.phase = 'pending';
       for (const other of s.sockets) if (other !== p.ws) other.terminate();

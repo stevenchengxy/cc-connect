@@ -38,7 +38,10 @@ async function fixture(t) {
     const action = new URL(url).pathname.split('/').pop()
     requests.push(action)
     if (!f.online) throw new Error('unavailable')
-    if (action === 'register') return Response.json({status:'pending'},{status:201})
+    if (action === 'register') {
+      f.submittedInvite = JSON.parse(opts.body).invite
+      return Response.json({status:'pending'},{status:201})
+    }
     if (action === 'login') return Response.json({token,...data})
     assert.equal(opts.headers.authorization,'Bearer ' + token)
     if (action === 'logout') return new Response(null,{status:204})
@@ -53,7 +56,12 @@ test('invited registration, pending approval and fresh online authorization on e
   const f = await fixture(t), app=f.create()
   await assert.rejects(app.requireApproved(),/登录/)
   await assert.rejects(app.register({...credentials,invite:'bad'}),/邀请码/)
-  assert.deepEqual(await app.register({...credentials,invite:randomBytes(32).toString('base64url')}),{status:'pending'})
+  await assert.rejects(app.register({...credentials,invite:'A1CD-2345'}),/邀请码/)
+  const legacyInvite = randomBytes(32).toString('base64url')
+  assert.deepEqual(await app.register({...credentials,invite:legacyInvite}),{status:'pending'})
+  assert.equal(f.submittedInvite,legacyInvite)
+  assert.deepEqual(await app.register({...credentials,invite:'  abcd - 9xj6  '}),{status:'pending'})
+  assert.equal(f.submittedInvite,'ABCD9XJ6')
   assert.equal((await app.login(credentials)).status,'pending')
   assert(!JSON.stringify(app.state).includes(f.token))
   await assert.rejects(app.requireApproved(),/等待管理员/)

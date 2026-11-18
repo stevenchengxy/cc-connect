@@ -23,6 +23,8 @@ async function setup(t) {
 test('bootstrap is preprovisioned, once-only, generic on failure, with no client-supplied role', async t => {
   const env = database(t), call = api(env), bootstrap = token(), user = {username:'Owner',password:token(),bootstrap};
   assert.equal((await call('POST','auth/bootstrap',user)).status,403);
+  env.CC_ADMIN_BOOTSTRAP_SHA256 = sha('ABCD9XJ6');
+  assert.equal((await call('POST','auth/bootstrap',{...user,bootstrap:'ABCD9XJ6'})).status,403);
   env.CC_ADMIN_BOOTSTRAP_SHA256 = sha(bootstrap);
   const created = await Promise.all([call('POST','auth/bootstrap',user), call('POST','auth/bootstrap',{...user,username:'OtherOwner'})]);
   assert.deepEqual(created.map(r=>r.status).sort(),[201,403]);
@@ -38,9 +40,14 @@ test('bootstrap is preprovisioned, once-only, generic on failure, with no client
 test('single-use invites require approval, revocation closes both roles and prevents reactivation', async t => {
   const {env,call,result} = await setup(t), admin = result.token;
   const {invite,expiresAt} = await (await call('POST','admin/invites',undefined,admin)).json();
+  assert.match(invite,/^[2-9A-HJ-NP-Z]{4}-[2-9A-HJ-NP-Z]{4}$/);
+  assert.ok(env.handle.prepare('SELECT 1 FROM account_invites WHERE digest=?').get(sha(invite.replace('-',''))));
   assert.ok(expiresAt > Date.now()/1000 && expiresAt < Date.now()/1000+86401);
   const password = token(), request = username => ({username,password,invite,role:'admin',status:'approved'});
-  const registrations = await Promise.all([call('POST','auth/register',request('Member.A')),call('POST','auth/register',request('Member.B'))]);
+  const registrations = await Promise.all([
+    call('POST','auth/register',{...request('Member.A'),invite:invite.toLowerCase().replace('-',' ')}),
+    call('POST','auth/register',{...request('Member.B'),invite:invite.replace('-','')})
+  ]);
   assert.deepEqual(registrations.map(r=>r.status).sort(),[201,403]);
   const username = registrations[0].status===201 ? 'Member.A' : 'Member.B';
   const login = await (await call('POST','auth/login',{username,password})).json();
@@ -71,6 +78,35 @@ test('single-use invites require approval, revocation closes both roles and prev
   assert.equal((await call('PATCH',target,{status:'approved'},admin)).status,409);
   const revoked=await call('POST','auth/login',{username,password}); assert.equal(revoked.status,403);
   assert.deepEqual(await revoked.json(),{error:'account_revoked'});
+});
+
+test('unexpired legacy registration invites remain case-sensitive; expired short invites are rejected', async t => {
+  const {env,call,result} = await setup(t);
+  const legacy = 'aB_-' + 'xyQ9'.repeat(9) + 'Az0';
+  const user = {username:'Member.Legacy',password:token()};
+  env.handle.prepare('INSERT INTO account_invites(digest,expires) VALUES(?,?)').run(sha(legacy),Date.now()+86_400_000);
+  assert.equal((await call('POST','auth/register',{...user,invite:legacy.toUpperCase()})).status,403);
+  assert.equal((await call('POST','auth/register',{...user,invite:legacy})).status,201);
+  const {invite} = await (await call('POST','admin/invites',undefined,result.token)).json();
+  env.handle.prepare('UPDATE account_invites SET expires=? WHERE digest=?').run(Date.now()-1,sha(invite.replace('-','')));
+  assert.equal((await call('POST','auth/register',{...user,username:'ExpiredUser',invite})).status,403);
+});
+
+test('short invite issuance retries active and redeemed codes and preserves the outstanding invite cap', async t => {
+  const {env,call,result} = await setup(t);
+  env.handle.prepare('INSERT INTO account_invites VALUES(?,?)').run(sha('22222222'),Date.now()+86_400_000);
+  const member = approvedSession(env);
+  env.handle.prepare('UPDATE accounts SET invite=? WHERE id=?').run(sha('33333333'),member.id);
+  let attempt = 0;
+  t.mock.method(crypto,'getRandomValues',buffer => buffer.fill(attempt++));
+  const response = await call('POST','admin/invites',undefined,result.token);
+  assert.equal(response.status,201);
+  assert.equal((await response.json()).invite,'4444-4444');
+  const insert = env.handle.prepare('INSERT INTO account_invites VALUES(?,?)');
+  for (let i=2; i<256; i++) insert.run(sha('slot'+i),Date.now()+86_400_000);
+  const full = await call('POST','admin/invites',undefined,result.token);
+  assert.equal(full.status,429);
+  assert.deepEqual(await full.json(),{error:'invite_limit'});
 });
 
 test('logout invalidates an enrolled pair, including peer access to buffered messages', async t => {

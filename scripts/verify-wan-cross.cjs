@@ -136,16 +136,8 @@ async function main() {
     if (host) {
       await page.exposeFunction('qaHost', async () => {
         const result = await peer.host({name:'CC Connect WAN synthetic canvas'})
-        const spec = JSON.parse(Buffer.from(result.invite.slice(4), 'base64url').toString())
-        assert.equal(spec.managed, 1, 'Public registration failed')
-        // Local smoke tests can exercise the online path on one machine. The
-        // real cross-network run keeps the application's default path selection.
-        if (process.env.CC_QA_FORCE_PUBLIC_PAIRING === '1') {
-          delete spec.ips
-          delete spec.pin
-          delete spec.port
-        }
-        const testCode = 'RD1.' + Buffer.from(JSON.stringify(spec)).toString('base64url')
+        assert(result.internetAvailable, 'Public registration failed')
+        const testCode = result.invite
         const payload = nativeWindow ? require('./windows-qa/window-bridge.cjs').sealInvite(testCode, process.env.CC_QA_VIEWER_PUBLIC_KEY) : testCode
         await fs.writeFile(inviteFile, payload, {flag:'wx', mode:0o600})
         ownsInvite = true
@@ -159,7 +151,7 @@ async function main() {
         console.log('Synthetic host approved', mode, 'session')
       })
     } else {
-      const invite = rawInvite.startsWith('RD1.') ? rawInvite : JSON.parse(rawInvite)[mode]
+      const invite = rawInvite.trim().startsWith('{') ? JSON.parse(rawInvite)[mode] : rawInvite.trim()
       await page.exposeFunction('qaJoin', () => peer.join({invite, name:viewerName}))
     }
     await page.addInitScript(({host, requireRelay, ownedWindows}) => {

@@ -8,20 +8,29 @@ const { setTimeout: sleep } = require('node:timers/promises');
 const MAX_PACKET = 160 * 1024;
 const QUEUE_LIMIT = 4 * MAX_PACKET;
 const OPEN = 1;
+const CLOSING = 2;
 const CLOSED = 3;
+const CLOSE_DRAIN_MS = 5000;
 const transient = status => status === 408 || status === 429 || status >= 500;
+const blockedAtEdge = response => response.headers.get('cf-mitigated') === 'challenge' ||
+  (response.status === 403 && response.headers.get('content-type')?.includes('text/html'));
 
 const unreachable = '无法访问公网配对服务，请检查网络和系统代理后重试。';
-function registrationFailure(response) {
+function registrationFailure(response, role) {
+  if (response.status === 410) {
+    const reason = response.headers.get('x-cc-invite-state');
+    if (reason === 'used') return '这份公网邀请已被使用，请在共享端重新生成配对码。';
+    if (reason === 'closed') return '共享端已结束这份邀请，请在共享端生成新的配对码。';
+    if (reason === 'expired') return '这份公网邀请已过期，请在共享端生成新的配对码。';
+  }
   const messages = {
     403: '公网配对码验证失败，请重新复制共享端生成的完整配对码。',
-    404: '找不到这份公网邀请，请在共享端重新生成配对码。',
+    404: '找不到配对码。请核对输入，并确认共享端仍在等待连接。',
     409: '这份公网邀请已被使用，请在共享端重新生成配对码。',
     410: '这份公网邀请已结束或过期，请在共享端重新生成配对码。',
-    429: '公网配对服务暂时繁忙，请稍后重新生成配对码。'
+    429: role === 'host' ? '公网配对服务暂时繁忙，请稍后再生成配对码。' : '配对请求过于频繁，请稍后用同一个配对码重试。'
   };
-  if (response.headers.get('cf-mitigated') === 'challenge' ||
-      (response.status === 403 && response.headers.get('content-type')?.includes('text/html'))) {
+  if (blockedAtEdge(response)) {
     return '公网配对服务拒绝了此次网络访问，请联系服务管理员。';
   }
   return messages[response.status] || unreachable;
@@ -117,24 +126,33 @@ class Mailbox extends EventEmitter {
 
   async register() {
     let response;
-    try { response = await this.retryRequest('POST', '', { headers: { 'x-viewer-proof': this.proof } }, 2); }
+    // A lost acknowledgement may already have claimed the viewer slot. Retry
+    // using the same bearer while this attempt is still owned by the viewer.
+    try { response = await this.retryRequest('POST', '', { headers: { 'x-viewer-proof': this.proof } }, this.role === 'viewer' ? 4 : 2); }
     catch { throw new Error(this.accountError || unreachable); }
     await response.body?.cancel();
-    if (response.status !== 201 && response.status !== 200) throw new Error(this.accountError || registrationFailure(response));
+    if (response.status !== 201 && response.status !== 200) throw new Error(this.accountError || registrationFailure(response, this.role));
     this.registered = true;
     this.readyState = OPEN;
   }
 
   async retryRequest(method, suffix, opts, maxAttempts = 3) {
+    // The pairing owner enforces its invitation and consent deadlines. Until
+    // then, replay only idempotent packet operations with the original token
+    // and sequence. A temporary outage must not DELETE an unused invitation.
+    const canRetry = attempt => attempt + 1 < maxAttempts ||
+      (opts?.whilePairing && !this.active && this.readyState === OPEN);
     for (let attempt = 0; ; attempt++) {
       try {
         const response = await this.request(method, suffix, opts);
-        if (!transient(response.status) || attempt + 1 === maxAttempts) return response;
+        if (method === 'POST' && response.status === 429) return response;
+        const retryable = transient(response.status) || (opts?.whilePairing && !this.active && blockedAtEdge(response));
+        if (!retryable || !canRetry(attempt)) return response;
         await response.body?.cancel();
       } catch (error) {
-        if (this.controller.signal.aborted || attempt + 1 === maxAttempts) throw error;
+        if (this.controller.signal.aborted || !canRetry(attempt)) throw error;
       }
-      await sleep(250 * 2 ** attempt, undefined, { signal: this.controller.signal });
+      await sleep(Math.min(5000, 250 * 2 ** Math.min(attempt, 5)), undefined, { signal: this.controller.signal });
     }
   }
 
@@ -143,7 +161,8 @@ class Mailbox extends EventEmitter {
     try {
       while (this.readyState === OPEN) {
         if (delay) await sleep(delay, undefined, { signal: this.controller.signal });
-        const response = await this.retryRequest('GET', '/messages/' + (this.received + 1));
+        const response = await this.retryRequest('GET', '/messages/' + (this.received + 1), { whilePairing: true });
+        if (this.readyState !== OPEN) { await response.body?.cancel(); break; }
         if (response.status === 204) {
           const idle = this.active ? 3500 : !this.received && this.role === 'host' ? 1400 : 500;
           delay = Math.min(idle, delay + 250);
@@ -152,17 +171,24 @@ class Mailbox extends EventEmitter {
         if (response.status !== 200) { await response.body?.cancel(); throw new Error('Mailbox closed'); }
         const chunks = [];
         let length = 0;
-        for await (const bytes of response.body) {
-          length += bytes.length;
-          if (length > MAX_PACKET) throw new Error('Oversized signaling packet');
-          chunks.push(bytes);
+        try {
+          for await (const bytes of response.body) {
+            length += bytes.length;
+            if (length > MAX_PACKET) break;
+            chunks.push(bytes);
+          }
+        } catch (error) {
+          if (this.active || this.controller.signal.aborted) throw error;
+          delay = Math.min(5000, Math.max(250, delay * 2));
+          continue; // The server retains this packet until we request N+1.
         }
+        if (length > MAX_PACKET) throw new Error('Oversized signaling packet');
         if (this.readyState !== OPEN) break;
         this.received++;
         this.emit('message', Buffer.concat(chunks, length), true);
         delay = 0;
       }
-    } catch { this.terminate(); }
+    } catch { if (this.readyState === OPEN) this.terminate(); }
   }
 
   send(data) {
@@ -171,19 +197,25 @@ class Mailbox extends EventEmitter {
     this.bufferedAmount += data.length;
     this.queue = this.queue.then(async () => {
       if (this.controller.signal.aborted) return;
-      const response = await this.retryRequest('PUT', '/messages/' + sequence, { headers: { 'content-type': 'application/octet-stream' }, body: data });
+      const response = await this.retryRequest('PUT', '/messages/' + sequence, { headers: { 'content-type': 'application/octet-stream' }, body: data, whilePairing: true });
       await response.body?.cancel();
       if (response.status !== 204) throw new Error('Mailbox send failed');
     }).catch(() => this.terminate()).finally(() => { this.bufferedAmount -= data.length; });
   }
 
   close() {
-    // Flush an authenticated rejection before notifying the other endpoint.
+    if (this.readyState === CLOSING || this.readyState === CLOSED) return;
+    // Flush an authenticated rejection. The pairing owner has cleared its
+    // deadlines by this point, so a disconnected host must impose its own.
+    this.readyState = CLOSING;
+    this.drainTimer = setTimeout(() => this.terminate(), CLOSE_DRAIN_MS);
+    this.drainTimer.unref?.();
     void this.queue.then(() => this.terminate());
   }
 
   terminate() {
     if (this.readyState === CLOSED) return;
+    clearTimeout(this.drainTimer);
     this.readyState = CLOSED;
     this.controller.abort();
     if (this.registered) {

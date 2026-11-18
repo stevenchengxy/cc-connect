@@ -18,6 +18,58 @@ test('room enrollment requires invitation proof and concurrent readers cannot ta
   assert.equal((await send('viewer','GET',1,token())).status,410);
 });
 
+test('viewer guesses share an account limit across rooms, valid invitations and network changes', async t => {
+  t.mock.timers.enable({apis:['Date'], now:Date.now()});
+  const db = database(t), room = fixture(db);
+  assert.equal((await room.send('host','POST')).status,201);
+  const address = ip => new Request('https://example.test/v1/rooms/' + room.id + '/viewer', {
+    method:'POST', headers:{authorization:'Bearer ' + room.viewerToken, 'x-cc-session':room.members.viewer.session,
+      'x-viewer-proof':room.proof, 'cf-connecting-ip':ip}
+  });
+  const missing = fixture(db,room.members);
+  const misses = await Promise.all(Array.from({length:15}, () => missing.send('viewer','POST')));
+  assert(misses.every(response => response.status === 404));
+  assert.equal((await worker.fetch(address('198.51.100.9'),db)).status,429);
+  t.mock.timers.tick(60_000);
+  assert.equal((await worker.fetch(address('198.51.100.9'),db)).status,201);
+});
+
+test('viewer lookup limits also cover multiple approved accounts on one source address', async t => {
+  t.mock.timers.enable({apis:['Date'], now:Date.now()});
+  const db = database(t);
+  for (let account = 0; account < 6; account++) {
+    const missing = fixture(db);
+    for (let attempt = 0; attempt < 15; attempt++) assert.equal((await missing.send('viewer','POST')).status,404);
+  }
+  const valid = fixture(db);
+  assert.equal((await valid.send('host','POST')).status,201);
+  assert.equal((await valid.send('viewer','POST')).status,429);
+});
+
+test('an authenticated invitation distinguishes early closure, prior use and expiry', async t => {
+  const db = database(t);
+  const closed = fixture(db);
+  await closed.send('host','POST');
+  await closed.send('host','DELETE');
+  const early = await closed.send('viewer','POST');
+  assert.equal(early.status, 410);
+  assert.equal(early.headers.get('x-cc-invite-state'), 'closed');
+  const invalidProof = await closed.send('viewer','POST',null,token(),null,token());
+  assert.equal(invalidProof.status, 403);
+  assert.equal(invalidProof.headers.get('x-cc-invite-state'), null);
+
+  const used = fixture(db);
+  await used.send('host','POST');
+  await used.send('viewer','POST');
+  await used.send('viewer','DELETE');
+  assert.equal((await used.send('viewer','POST')).headers.get('x-cc-invite-state'), 'used');
+
+  const expired = fixture(db);
+  await expired.send('host','POST');
+  db.handle.prepare('UPDATE rooms SET expires=0 WHERE id=?').run(expired.id);
+  assert.equal((await expired.send('viewer','POST')).headers.get('x-cc-invite-state'), 'expired');
+});
+
 test('encrypted packets preserve order and idempotency, drain before closing, then expire', async t => {
   const db = database(t);
   const { send,id } = fixture(db);
