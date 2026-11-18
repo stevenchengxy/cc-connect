@@ -78,7 +78,7 @@ function trusted(frame) {
     frame === window.webContents.mainFrame && frame.url === pageUrl)
 }
 
-function finish(reason = '连接已结束') {
+function finish(reason = '连接已结束', error = false) {
   const active = current
   current = null
   if (!active) return
@@ -88,7 +88,7 @@ function finish(reason = '连接已结束') {
   tray?.destroy()
   tray = null
   if (window && !window.isDestroyed()) window.setTitle('CC Connect')
-  send({ type: 'closed', reason })
+  send({ type: 'closed', reason, error })
 }
 
 function showSharingIndicator() {
@@ -109,7 +109,10 @@ function showSharingIndicator() {
 function createSession(role) {
   if (installingUpdate) throw new Error('更新任务正在进行，请稍候。')
   if (current || saveInProgress) throw new Error('请先结束当前配对，或等待网络设置保存完成。')
-  const network = new PairingNetwork({ managedUrl: !app.isPackaged && app.commandLine.hasSwitch('test-local-pairing') ? undefined : managedUrl })
+  const network = new PairingNetwork({
+    managedUrl: !app.isPackaged && app.commandLine.hasSwitch('test-local-pairing') ? undefined : managedUrl,
+    fetchImpl: (url, init) => session.defaultSession.fetch(url, { ...init, credentials: 'omit' })
+  })
   const active = { network, role, phase: 'pairing', allowControl: false }
   current = active
   active.network.on('event', event => {
@@ -130,7 +133,7 @@ function createSession(role) {
           active.pendingSignals = []
           active.network.getManagedIceServers().then(iceServers => {
             if (current !== active) return
-            send({ type: 'accepted', role, name: event.name, allowControl: active.allowControl, managedWan: true, managedIceServers: iceServers })
+            send({ type: 'accepted', role, name: event.name, allowControl: active.allowControl, managedWan: true, managedIceServers: iceServers, managedIceUnavailable: active.network.managedIceUnavailable })
             for (const signal of active.pendingSignals) send({ type: 'signal', signal })
             active.pendingSignals = null
           }).catch(() => { if (current === active) finish('公网连接初始化失败，请重新配对。') })
@@ -224,7 +227,7 @@ function registerHandlers() {
           ? await active.network.host(options)
           : await active.network.join({ ...options, invite })
       } catch (err) {
-        if (current === active) finish(err.message)
+        if (current === active) finish(err.message, true)
         throw err
       }
     })

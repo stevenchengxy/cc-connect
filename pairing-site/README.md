@@ -37,3 +37,22 @@
 4. 使用两个不同网络的设备进行 TURN-only 的画面传输验收，并在供应商控制台核对用量。
 
 [Cloudflare 官方凭据文档](https://developers.cloudflare.com/realtime/turn/generate-credentials/)
+
+## 部署到自己的 Cloudflare 账户
+
+当下载站的边缘防护拦截桌面 API 时，可以把同一个配对 Worker 独立部署到专用 `workers.dev` 名称。部署命令会创建项目专用的 Worker、D1 数据库和 Realtime TURN Key，并启用公网端点。视频中继流量按该 Cloudflare 账户的实际额度计费。
+
+1. 在自己的 Cloudflare 账户中选择 `workers.dev` 子域名。为这个账户创建 API Token，授予 Workers Scripts Edit、D1 Edit 和 Calls Write。将账户 ID 和 Token 通过本机的密钥管理器注入 `CLOUDFLARE_ACCOUNT_ID`、`CLOUDFLARE_API_TOKEN` 环境变量。请勿将其发到聊天、命令行参数或仓库。
+2. 从仓库根目录运行以下命令。最后一个参数为专用服务名，已有其他项目占用时请换名。脚本使用 Node 24 内置的 HTTPS 与 Cloudflare API。
+
+   ```sh
+   node pairing-site/deploy-cloudflare.cjs --apply cc-connect-pair
+   ```
+
+3. 使用命令输出的域名请求 `GET /health`，确认返回 JSON、`service=cc-connect-pair` 和 `protocol=1`。将桌面应用的托管服务地址设置为这个域名的 `/v1`，重新构建和发布。两台客户端都升级后重新生成邀请。在一对临时测试设备上确认两个角色注册后 `/ice` 返回有效中继地址，最后在真实的不同网络上检查 TURN-only 画面和所选候选对。公开 API 需要允许正常桌面客户端访问。
+
+脚本检查远端所有权标记和资源 ID。再次使用相同账户及服务名运行，会复用现有 D1 和 TURN Key，核对已应用 SQL 的哈希并应用新增迁移。部署记录保存在 `~/.config/cc-connect-cloudflare/<账户>/<服务名>/deployment.json`，请备份此记录，避免多个运维环境并发修改同一服务。当供应商首次返回 TURN 密钥时，脚本先将其写入仅当前用户可读的恢复记录，再通过 HTTPS 写入 Worker 的 secret binding。确认写入后，脚本从恢复记录中移除该密钥；账户 API Token 始终只在进程内使用。
+
+若过程被中断，使用同一部署记录重试。如果 `deploy.lock` 残留，先确认本机没有部署进程，再移除对应记录目录下的锁文件。若 TURN Key 已经创建但生成响应中途丢失，请在账户中核实专用 Key 并恢复其凭据；脚本遇到这种情况会停止。长期密钥不会随重试自动轮换。
+
+[Cloudflare Worker 上传格式](https://developers.cloudflare.com/workers/configuration/multipart-upload-metadata/) · [D1 查询和批处理](https://developers.cloudflare.com/api/resources/d1/subresources/database/methods/query/) · [Realtime TURN Key API](https://developers.cloudflare.com/api/resources/calls/subresources/turn/methods/create/)

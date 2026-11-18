@@ -10,6 +10,22 @@ const OPEN = 1;
 const CLOSED = 3;
 const transient = status => status === 408 || status === 429 || status >= 500;
 
+const unreachable = '无法访问公网配对服务，请检查网络和系统代理后重试。';
+function registrationFailure(response) {
+  const messages = {
+    403: '公网配对码验证失败，请重新复制共享端生成的完整配对码。',
+    404: '找不到这份公网邀请，请在共享端重新生成配对码。',
+    409: '这份公网邀请已被使用，请在共享端重新生成配对码。',
+    410: '这份公网邀请已结束或过期，请在共享端重新生成配对码。',
+    429: '公网配对服务暂时繁忙，请稍后重新生成配对码。'
+  };
+  if (response.headers.get('cf-mitigated') === 'challenge' ||
+      (response.status === 403 && response.headers.get('content-type')?.includes('text/html'))) {
+    return '公网配对服务拒绝了此次网络访问，请联系服务管理员。';
+  }
+  return messages[response.status] || unreachable;
+}
+
 function turnURL(value) {
   if (typeof value !== 'string' || value.length > 512) return false;
   const match = /^turns?:((?:[a-z0-9.-]+|\[[a-f0-9:]+\])(?::[0-9]{1,5})?)(?:\?transport=(?:tcp|udp))?$/i.exec(value);
@@ -65,23 +81,32 @@ class Mailbox extends EventEmitter {
   async ice() {
     if (!this.active || this.readyState !== OPEN) return [];
     try {
-      const response = await this.request('GET', '/ice', { timeout: 2500 });
-      if (response.status !== 200) { await response.body?.cancel(); return []; }
+      this.iceUnavailable = false;
+      const response = await this.retryRequest('GET', '/ice', { timeout: 7000 }, 2);
+      if (response.status !== 200) {
+        this.iceUnavailable = response.status !== 204;
+        await response.body?.cancel();
+        return [];
+      }
       const chunks = [];
       let size = 0;
       for await (const bytes of response.body) {
         size += bytes.length;
-        if (size > 16 * 1024) return [];
+        if (size > 16 * 1024) throw new Error('Invalid grant size');
         chunks.push(bytes);
       }
-      return iceServers(JSON.parse(Buffer.concat(chunks, size)));
-    } catch { return []; }
+      const servers = iceServers(JSON.parse(Buffer.concat(chunks, size)));
+      this.iceUnavailable = servers.length === 0;
+      return servers;
+    } catch { this.iceUnavailable = true; return []; }
   }
 
   async register() {
-    const response = await this.retryRequest('POST', '', { headers: { 'x-viewer-proof': this.proof } }, 2);
+    let response;
+    try { response = await this.retryRequest('POST', '', { headers: { 'x-viewer-proof': this.proof } }, 2); }
+    catch { throw new Error(unreachable); }
     await response.body?.cancel();
-    if (response.status !== 201 && response.status !== 200) throw new Error('无法连接信令服务，或邀请已被使用。');
+    if (response.status !== 201 && response.status !== 200) throw new Error(registrationFailure(response));
     this.registered = true;
     this.readyState = OPEN;
   }

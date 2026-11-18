@@ -179,7 +179,7 @@ test('managed pairing reaches the approved peer when every LAN address is unreac
   assert.deepEqual(await host.getManagedIceServers(), []);
   assert.deepEqual(await viewer.getManagedIceServers(), []);
   assert.throws(() => viewer.signal({ type: 'candidate', candidate: null }), /尚未就绪/);
-  await assert.rejects(duplicate.join({ invite: inaccessible }), /信令服务/);
+  await assert.rejects(duplicate.join({ invite: inaccessible }), /已被使用/);
   const connected = next(viewer, 'connected');
   host.respond(true);
   assert.equal((await connected).managedWan, true);
@@ -231,4 +231,41 @@ test('managed service failure produces a usable invite compatible with LAN-only 
   const rejected = next(viewer, 'closed');
   host.respond(false);
   assert.match((await rejected).reason, /拒绝/);
+});
+
+test('public registration errors distinguish access denial, invite state and overloaded service', async () => {
+  const key = randomBytes(32).toString('base64url');
+  const invite = 'RD1.' + Buffer.from(JSON.stringify({key, exp: Date.now() + 60000, managed: 1})).toString('base64url');
+  for (const [status, headers, expected] of [
+    [403, {'content-type': 'text/html'}, /拒绝了此次网络访问/],
+    [403, {}, /配对码验证失败/], [404, {}, /找不到/],
+    [409, {}, /已被使用/], [410, {}, /结束或过期/], [429, {}, /暂时繁忙/]
+  ]) {
+    const network = new PairingNetwork({
+      managedUrl: 'https://pair.example/v1', fetchImpl: async () => new Response(null, {status, headers})
+    });
+    await assert.rejects(network.join({invite}), expected);
+    assert.equal(network.state, null);
+  }
+});
+
+test('configured TURN failure can recover, while no configured TURN is a normal empty result', async () => {
+  const {Mailbox} = require('../src/managed-mailbox.cjs');
+  let attempts = 0;
+  const statuses = [503, 503, 200, 204];
+  const mailbox = new Mailbox('https://pair.example/v1', 'host', randomBytes(32), async () => {
+    const status = statuses[attempts++];
+    return status === 200 ? Response.json({iceServers: [{urls:'turn:relay.example:3478', username:'u', credential:'v'}]})
+      : new Response(null, {status});
+  });
+  mailbox.readyState = 1;
+  mailbox.active = true;
+  const network = new PairingNetwork();
+  network.state = {peer: {ws:mailbox, phase:'active', managedWan:true}};
+  assert.deepEqual(await network.getManagedIceServers(), []);
+  assert.equal(network.managedIceUnavailable, true);
+  assert.equal((await network.getManagedIceServers()).length, 1);
+  assert.equal(network.managedIceUnavailable, false);
+  assert.deepEqual(await mailbox.ice(), []);
+  assert.equal(mailbox.iceUnavailable, false);
 });

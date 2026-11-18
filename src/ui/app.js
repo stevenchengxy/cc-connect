@@ -162,10 +162,11 @@ $('host-button').onclick = async () => {
   phase = 'opening';
   syncHome(); notice('home-notice'); setStatus('正在创建邀请', 'pending');
   try {
-    const { invite, expiresAt, internetAvailable } = await api.host();
+    const { invite, expiresAt, internetAvailable, internetIssue } = await api.host();
     if (generation !== token) return;
     if (phase === 'opening') phase = 'listening';
     $('host-invite').value = invite;
+    if (internetIssue) notice('home-notice', internetIssue, true);
     const expires = new Date(expiresAt).getTime();
     function showLifetime() {
       $('host-help').hidden = false;
@@ -415,6 +416,7 @@ function connectionChanged(value) {
 }
 function mediaFailureMessage(value) {
   if (!value.managedWan) return '无法建立媒体连接。跨公网时，请检查两端的 TURN 中继设置。';
+  if (value.managedIceUnavailable && !info.turnConfigured) return '已完成公网配对，但未能获取媒体中继凭据，画面也无法直连。请稍后重试或联系服务管理员。';
   if (value.managedTurn && !info.turnConfigured) return '已完成公网配对，但媒体中继未能连接。请稍后重试，或在连接设置中使用自己的 TURN 中继。';
   return info.turnConfigured
     ? '已完成公网配对，但画面连接失败。请检查 TURN 地址、凭据和网络可达性。'
@@ -443,6 +445,7 @@ function startSession(event) {
   const value = room = {
     pc, role:host ? 'host' : 'viewer', allowControl:host && event.allowControl === true,
     profile:'balanced', managedWan:event.managedWan === true,
+    managedIceUnavailable:event.managedIceUnavailable === true,
     managedTurn:managedServers.some(server => [server.urls].flat().some(url => /^turns?:/i.test(url))),
     candidates:[], signaling:Promise.resolve(), adjusting:false
   };
@@ -634,7 +637,7 @@ async function handleEvent(event) {
       if (room?.role === 'host') controlUnavailable(room,event.message);
       break;
     case 'closed':
-      if (phase !== 'idle') backHome(event.reason || '对方已结束连接。');
+      if (phase !== 'idle') backHome(event.reason || '对方已结束连接。', event.error === true);
       break;
     case 'error':
       if (phase !== 'idle') await disconnect(event.message || '连接出错。',true);

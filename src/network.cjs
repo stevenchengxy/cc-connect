@@ -205,10 +205,10 @@ class PairingNetwork extends EventEmitter {
       await mailbox.register();
       this.live(s);
       return mailbox;
-    } catch {
+    } catch (error) {
       mailbox.terminate();
       s.sockets.delete(mailbox);
-      throw new Error('无法连接信令服务，或邀请已被使用。');
+      throw error;
     }
   }
 
@@ -245,10 +245,11 @@ class PairingNetwork extends EventEmitter {
             spec.managed = 1;
             this.attach(s, wan.value, true);
           } else if (lan.status === 'rejected') throw wan.reason;
+          else s.internetIssue = wan.reason.message;
         } else Object.assign(spec, await direct);
       }
       s.expires = setTimeout(() => this.end(s, '邀请已过期。'), Math.max(1, spec.exp - Date.now()));
-      return { invite: INVITE_PREFIX + b64(Buffer.from(JSON.stringify(spec))), expiresAt: spec.exp, internetAvailable: !!(spec.relay || spec.managed) };
+      return { invite: INVITE_PREFIX + b64(Buffer.from(JSON.stringify(spec))), expiresAt: spec.exp, internetAvailable: !!(spec.relay || spec.managed), internetIssue: s.internetIssue };
     } catch (err) { this.end(s, '', false); throw err; }
   }
 
@@ -302,7 +303,8 @@ class PairingNetwork extends EventEmitter {
         }
         this.live(s);
         if (!ws && managed) ws = await this.mailbox(s);
-        if (!ws) throw new Error('无法验证或连接共享端。请确认两端处于同一局域网或 VPN、邀请有效且防火墙允许连接。');
+        if (!ws && spec.managed && relayUrl) throw new Error('这份邀请使用公共配对服务。如需连接，请先在连接设置中清空自建信令地址。');
+        if (!ws) throw new Error('无法验证或连接共享端。此配对码仅限局域网或 VPN。跨网连接请更新两端并重新生成配对码。');
       }
       this.live(s);
       const p = this.attach(s, ws, !!spec.relay || ws instanceof Mailbox);
@@ -410,7 +412,12 @@ class PairingNetwork extends EventEmitter {
     // One short-lived grant per approved endpoint, scoped to this session.
     peer.iceGrant ??= peer.ws.ice();
     const servers = await peer.iceGrant;
+    if (peer.ws.iceUnavailable) peer.iceGrant = null;
     return this.state?.peer === peer ? servers : [];
+  }
+
+  get managedIceUnavailable() {
+    return this.state?.peer?.ws?.iceUnavailable === true;
   }
 
   signal(payload) {

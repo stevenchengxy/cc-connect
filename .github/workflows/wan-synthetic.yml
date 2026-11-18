@@ -6,12 +6,20 @@ jobs:
   receive:
     runs-on: ubuntu-24.04
     timeout-minutes: 4
+    env:
+      CC_WAN_QA_PAIR_URL: ${{ vars.CC_CONNECT_QA_PAIR_URL }}
     steps:
       - uses: actions/checkout@8f4b7f84864484a7bf31766abe9204da3cbe65b3
         with:
           persist-credentials: false
       - run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: Receive generated video
+      - name: Install the release's Electron runtime
+        run: node node_modules/electron/install.js
+      - name: Verify the view-only session
         env:
           CC_WAN_QA_INVITE: ${{ secrets.CC_CONNECT_SYNTHETIC_WAN_031 }}
-        run: node scripts/verify-wan-cross.cjs viewer
+        run: xvfb-run -a node_modules/.bin/electron scripts/verify-wan-cross.cjs viewer view
+      - name: Verify consensual test-surface control
+        env:
+          CC_WAN_QA_INVITE: ${{ secrets.CC_CONNECT_SYNTHETIC_WAN_031 }}
+        run: xvfb-run -a node_modules/.bin/electron scripts/verify-wan-cross.cjs viewer control
