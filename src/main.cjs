@@ -1,5 +1,5 @@
 const {
-  app, BrowserWindow, clipboard, desktopCapturer, dialog, ipcMain, Menu, nativeImage, powerMonitor,
+  app, BrowserWindow, clipboard, desktopCapturer, dialog, ipcMain, Menu, nativeImage, net, powerMonitor,
   safeStorage, screen, session, systemPreferences, Tray
 } = require('electron')
 const os = require('node:os')
@@ -9,6 +9,7 @@ const { PairingNetwork } = require('./network.cjs')
 const { InputBridge } = require('../native/bridge.cjs')
 const { Settings } = require('./settings.cjs')
 const { Updater } = require('./updater.cjs')
+const { systemUpdateTransport } = require('./update-transport.cjs')
 
 const page = path.join(__dirname, 'ui', 'index.html')
 const pageUrl = pathToFileURL(page).href
@@ -362,7 +363,8 @@ if (primaryInstance) app.whenReady().then(async () => {
   const locale = app.getLocale().toLowerCase()
   language = /^(zh-(tw|hk|mo)|zh-hant)/.test(locale) ? 'zh-TW' : locale.startsWith('zh') ? 'zh-CN' : 'en'
   if (await offerInstallation()) return
-  updater = new Updater({ app, emit: state => send({ type: 'update', state }), canInstall: () => !current })
+  updater = new Updater({ app, request: systemUpdateTransport(net, session.defaultSession),
+    emit: state => send({ type: 'update', state }), canInstall: () => !current })
   preferences = new Settings(app.getPath('userData'), safeStorage)
   let startupError
   try { await preferences.load() } catch (err) { startupError = err.message }

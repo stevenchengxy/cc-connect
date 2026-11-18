@@ -417,10 +417,10 @@ function connectionChanged(value) {
 function mediaFailureMessage(value) {
   if (!value.managedWan) return '无法建立媒体连接。跨公网时，请检查两端的 TURN 中继设置。';
   if (value.managedIceUnavailable && !info.turnConfigured) return '已完成公网配对，但未能获取媒体中继凭据，画面也无法直连。请稍后重试或联系服务管理员。';
-  if (value.managedTurn && !info.turnConfigured) return '已完成公网配对，但媒体中继未能连接。请稍后重试，或在连接设置中使用自己的 TURN 中继。';
+  if (value.managedTurn && !info.turnConfigured) return '已完成公网配对，但媒体中继未能连接。请稍后重试或联系服务管理员。';
   return info.turnConfigured
     ? '已完成公网配对，但画面连接失败。请检查 TURN 地址、凭据和网络可达性。'
-    : '已完成公网配对，但两端无法直连。请在连接设置中填写可用的 TURN 中继，或让两台电脑加入同一 VPN。';
+    : '已完成公网配对，但两端无法直连，公共媒体中继尚未启用。请联系服务管理员。';
 }
 function startSession(event) {
   if (!['request','joining'].includes(phase)) return;
