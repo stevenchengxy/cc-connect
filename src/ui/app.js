@@ -162,7 +162,7 @@ $('host-button').onclick = async () => {
   phase = 'opening';
   syncHome(); notice('home-notice'); setStatus('正在创建邀请', 'pending');
   try {
-    const { invite, expiresAt } = await api.host();
+    const { invite, expiresAt, internetAvailable } = await api.host();
     if (generation !== token) return;
     if (phase === 'opening') phase = 'listening';
     $('host-invite').value = invite;
@@ -178,7 +178,10 @@ $('host-button').onclick = async () => {
         clearInterval(expiryTimer);
         if (phase === 'listening') void disconnect('配对码已过期。请生成新的配对码。');
       } else {
-        $('host-help').textContent = t('剩余 {time} 有效', {time: Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0')});
+        const lifetime = t('剩余 {time} 有效', {time: Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0')});
+        $('host-help').textContent = internetAvailable === false
+          ? t('公网配对暂不可用。此码仅限局域网或 VPN。') + ' ' + lifetime
+          : lifetime;
       }
     }
     showLifetime();
@@ -402,13 +405,20 @@ function connectionChanged(value) {
     if (value.role === 'host') $('sharing-title').textContent = t('你的屏幕正在共享');
     void readStats(value);
   } else if (['closed','failed'].includes(state)) {
-    terminate(value,'无法建立媒体连接。跨公网时，请检查两端的 TURN 中继设置。');
+    terminate(value, mediaFailureMessage(value));
   } else if (state === 'disconnected' && !value.lossTimer) {
     if (value.role === 'host' && value.allowControl) Promise.resolve(api.input({kind:'reset'})).catch(() => {});
     setStatus('正在恢复连接','pending');
     $('session-stats').textContent = t('网络连接中断，正在等待恢复…');
     value.lossTimer = setTimeout(() => terminate(value,'网络连接超时，已结束会话。'),8000);
   }
+}
+function mediaFailureMessage(value) {
+  if (!value.managedWan) return '无法建立媒体连接。跨公网时，请检查两端的 TURN 中继设置。';
+  if (value.managedTurn && !info.turnConfigured) return '已完成公网配对，但媒体中继未能连接。请稍后重试，或在连接设置中使用自己的 TURN 中继。';
+  return info.turnConfigured
+    ? '已完成公网配对，但画面连接失败。请检查 TURN 地址、凭据和网络可达性。'
+    : '已完成公网配对，但两端无法直连。请在连接设置中填写可用的 TURN 中继，或让两台电脑加入同一 VPN。';
 }
 function startSession(event) {
   if (!['request','joining'].includes(phase)) return;
@@ -426,10 +436,15 @@ function startSession(event) {
   $('sharing-title').textContent = t('正在建立屏幕共享');
   $('session-stats').textContent = t('正在协商加密连接…');
   setStatus('正在连接','pending');
-  const pc = new RTCPeerConnection({iceServers:info.iceServers || []});
+  const iceServers = [...(info.iceServers || [])];
+  const managedServers = event.managedWan && Array.isArray(event.managedIceServers) ? event.managedIceServers : [];
+  if (event.managedWan) iceServers.push({urls:'stun:stun.cloudflare.com:3478'}, ...managedServers);
+  const pc = new RTCPeerConnection({iceServers});
   const value = room = {
     pc, role:host ? 'host' : 'viewer', allowControl:host && event.allowControl === true,
-    profile:'balanced', candidates:[], signaling:Promise.resolve(), adjusting:false
+    profile:'balanced', managedWan:event.managedWan === true,
+    managedTurn:managedServers.some(server => [server.urls].flat().some(url => /^turns?:/i.test(url))),
+    candidates:[], signaling:Promise.resolve(), adjusting:false
   };
   showPermission(value);
   pc.onicecandidate = (e) => {
@@ -447,7 +462,11 @@ function startSession(event) {
     $('remote-video').play().catch(() => {});
   };
   value.statsTimer = setInterval(() => readStats(value),1500);
-  value.connectTimer = setTimeout(() => terminate(value,'等待画面超时。请核实录屏权限和两端的网络设置。'),90_000);
+  value.connectTimer = setTimeout(() => {
+    const negotiated = value.pc.localDescription && value.pc.remoteDescription;
+    terminate(value, negotiated && value.managedWan ? mediaFailureMessage(value)
+      : '等待画面超时。请核实录屏权限和两端的网络设置。');
+  },90_000);
   if (host) {
     attachChannel(value,pc.createDataChannel('jianping-control-v1',{ordered:true}));
     void capture(value);

@@ -110,8 +110,8 @@
   <dialog id="settings-dialog" aria-labelledby="settings-title">
     <form id="settings-form">
       <div class="dialog-head"><h2 id="settings-title" data-i18n="连接设置">连接设置</h2><button type="button" id="close-settings" class="icon-button" aria-label="关闭" data-i18n-aria-label="关闭"><svg><use href="#i-close"/></svg></button></div>
-      <p class="settings-help" data-i18n="同一局域网或 VPN 可留空。跨公网时，两端填写相同的配对服务，并填写你的 TURN 中继凭据。">同一局域网或 VPN 可留空。跨公网时，两端填写相同的配对服务，并填写你的 TURN 中继凭据。</p>
-      <label for="relay-url" class="field-label"><span data-i18n="配对服务">配对服务</span> <span data-i18n="局域网可留空">局域网可留空</span></label><input type="text" id="relay-url" placeholder="wss://relay.example.com" autocomplete="off" spellcheck="false">
+      <p class="settings-help" data-i18n="默认自动配对。如需使用自己的服务，可在这里填写。">默认自动配对。如需使用自己的服务，可在这里填写。</p>
+      <label for="relay-url" class="field-label"><span data-i18n="配对服务">配对服务</span> <span data-i18n="选填">选填</span></label><input type="text" id="relay-url" placeholder="wss://relay.example.com" autocomplete="off" spellcheck="false">
       <label for="turn-url" class="field-label"><span data-i18n="TURN 中继">TURN 中继</span> <span data-i18n="选填">选填</span></label><input type="text" id="turn-url" placeholder="turns:turn.example.com:5349" autocomplete="off" spellcheck="false">
       <div class="credential-fields"><div><label for="turn-user" class="field-label" data-i18n="TURN 用户名">TURN 用户名</label><input type="text" id="turn-user" autocomplete="off"></div><div><label for="turn-password" class="field-label" data-i18n="TURN 密码">TURN 密码</label><input type="password" id="turn-password" autocomplete="off"></div></div>
       <p class="settings-help" data-i18n="配对服务交换连接信息。TURN 在无法直连时转发加密画面。">配对服务交换连接信息。TURN 在无法直连时转发加密画面。</p>

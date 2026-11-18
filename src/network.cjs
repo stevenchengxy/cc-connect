@@ -8,6 +8,7 @@ const os = require('node:os');
 const { isIP } = require('node:net');
 const WebSocket = require('ws');
 const forge = require('node-forge');
+const { Mailbox } = require('./managed-mailbox.cjs');
 
 const INVITE_PREFIX = 'RD1.';
 const LIFETIME = 10 * 60 * 1000;
@@ -42,9 +43,13 @@ function invitation(value) {
   try { spec = JSON.parse(Buffer.from(value.trim().slice(INVITE_PREFIX.length), 'base64url').toString()); } catch { fail(); }
   if (!spec || !isDigest(spec.key) || !Number.isSafeInteger(spec.exp)) fail();
   if (spec.exp < Date.now()) throw new Error('配对邀请已过期，请让共享端创建新邀请。');
+  if (spec.managed !== undefined && spec.managed !== 1) fail();
+  if (spec.relay && spec.managed) fail();
   if (spec.relay) {
     if (typeof spec.relay !== 'string') fail();
     spec.relay = relayURL(spec.relay);
+  } else if (spec.managed && !('ips' in spec) && !('pin' in spec) && !('port' in spec)) {
+    return spec;
   } else if (!isDigest(spec.pin) || !Number.isInteger(spec.port) || spec.port < 1 || spec.port > 65535 ||
       !Array.isArray(spec.ips) || spec.ips.length === 0 || spec.ips.length > 8 ||
       !spec.ips.every(ip => typeof ip === 'string' && isIP(ip) && !ip.includes('%'))) fail();
@@ -137,10 +142,10 @@ function rendezvous(spec, role) {
   return url.toString();
 }
 
-function dial(s, url, pin) {
+function dial(s, url, pin, timeout = pin ? 5000 : 10000) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(url, {
-      ...options, followRedirects: false, handshakeTimeout: pin ? 4500 : 9000,
+      ...options, followRedirects: false, handshakeTimeout: timeout,
       minVersion: 'TLSv1.2', rejectUnauthorized: !pin
     });
     s.sockets.add(ws);
@@ -161,7 +166,7 @@ function dial(s, url, pin) {
       clearTimeout(timer);
       resolve(ws);
     };
-    const timer = setTimeout(fail, pin ? 5000 : 10000);
+    const timer = setTimeout(fail, timeout);
     ws.on('error', fail);
     ws.once('close', () => { s.sockets.delete(ws); fail(); });
     if (pin) {
@@ -187,6 +192,26 @@ function listen(server, port, host) {
 class PairingNetwork extends EventEmitter {
   state = null;
 
+  constructor({ managedUrl, fetchImpl = globalThis.fetch } = {}) {
+    super();
+    this.managedUrl = managedUrl;
+    this.fetchImpl = fetchImpl;
+  }
+
+  async mailbox(s) {
+    const mailbox = new Mailbox(this.managedUrl, s.role, s.secret, this.fetchImpl);
+    s.sockets.add(mailbox);
+    try {
+      await mailbox.register();
+      this.live(s);
+      return mailbox;
+    } catch {
+      mailbox.terminate();
+      s.sockets.delete(mailbox);
+      throw new Error('无法连接信令服务，或邀请已被使用。');
+    }
+  }
+
   begin(role, name, secret) {
     if (this.state) throw new Error('请先结束当前配对或连接。');
     const state = { role, name: peerName(name), secret, sockets: new Set(), rawSockets: new Set(), peer: null };
@@ -208,36 +233,53 @@ class PairingNetwork extends EventEmitter {
         this.live(s);
         this.attach(s, ws, true);
       } else {
-        spec.ips = addresses(address);
-        const tls = await certificate();
-        this.live(s);
-        spec.pin = tls.pin;
-        s.server = https.createServer({ key: tls.key, cert: tls.cert, minVersion: 'TLSv1.2', handshakeTimeout: 5000 }, (_req, res) => {
-          res.writeHead(404, { Connection: 'close' }); res.end();
-        });
-        s.server.maxConnections = 20;
-        s.server.headersTimeout = 8000;
-        s.server.on('connection', socket => {
-          s.rawSockets.add(socket);
-          socket.once('close', () => s.rawSockets.delete(socket));
-        });
-        s.wss = new WebSocket.Server({ ...options, server: s.server, path: '/pair', verifyClient: () => !s.peer && s.sockets.size < 12 });
-        s.wss.on('error', () => { if (s.server.listening) this.end(s, '本机配对服务已中断。'); });
-        s.wss.on('connection', ws => { s.sockets.add(ws); this.attach(s, ws, false); });
-        try { await listen(s.server, 0, '::'); }
-        catch (error) {
-          if (!['EAFNOSUPPORT', 'EADDRNOTAVAIL', 'EPROTONOSUPPORT'].includes(error.code)) throw error;
-          await listen(s.server, 0, '0.0.0.0');
-          spec.ips = spec.ips.filter(ip => isIP(ip) === 4);
-          if (!spec.ips.length) throw new Error('当前系统仅支持 IPv4 监听，请选择 IPv4 地址。');
-        }
-        this.live(s);
-        s.server.on('error', () => this.end(s, '本机配对服务已中断。'));
-        spec.port = s.server.address().port;
+        const direct = this.openDirect(s, address);
+        if (this.managedUrl) {
+          const [lan, wan] = await Promise.allSettled([direct, this.mailbox(s)]);
+          this.live(s);
+          if (lan.status === 'fulfilled') {
+            Object.assign(spec, lan.value);
+            s.directAvailable = true;
+          }
+          if (wan.status === 'fulfilled') {
+            spec.managed = 1;
+            this.attach(s, wan.value, true);
+          } else if (lan.status === 'rejected') throw wan.reason;
+        } else Object.assign(spec, await direct);
       }
       s.expires = setTimeout(() => this.end(s, '邀请已过期。'), Math.max(1, spec.exp - Date.now()));
-      return { invite: INVITE_PREFIX + b64(Buffer.from(JSON.stringify(spec))), expiresAt: spec.exp };
+      return { invite: INVITE_PREFIX + b64(Buffer.from(JSON.stringify(spec))), expiresAt: spec.exp, internetAvailable: !!(spec.relay || spec.managed) };
     } catch (err) { this.end(s, '', false); throw err; }
+  }
+
+  async openDirect(s, address) {
+    const direct = { ips: addresses(address) };
+    const tls = await certificate();
+    this.live(s);
+    direct.pin = tls.pin;
+    s.server = https.createServer({ key: tls.key, cert: tls.cert, minVersion: 'TLSv1.2', handshakeTimeout: 5000 }, (_req, res) => {
+      res.writeHead(404, { Connection: 'close' }); res.end();
+    });
+    s.server.maxConnections = 20;
+    s.server.headersTimeout = 8000;
+    s.server.on('connection', socket => {
+      s.rawSockets.add(socket);
+      socket.once('close', () => s.rawSockets.delete(socket));
+    });
+    s.wss = new WebSocket.Server({ ...options, server: s.server, path: '/pair', verifyClient: () => !s.peer && s.sockets.size < 12 });
+    s.wss.on('error', () => { if (s.server.listening) this.end(s, '本机配对服务已中断。'); });
+    s.wss.on('connection', ws => { s.sockets.add(ws); this.attach(s, ws, false); });
+    try { await listen(s.server, 0, '::'); }
+    catch (error) {
+      if (!['EAFNOSUPPORT', 'EADDRNOTAVAIL', 'EPROTONOSUPPORT'].includes(error.code)) throw error;
+      await listen(s.server, 0, '0.0.0.0');
+      direct.ips = direct.ips.filter(ip => isIP(ip) === 4);
+      if (!direct.ips.length) throw new Error('当前系统仅支持 IPv4 监听，请选择 IPv4 地址。');
+    }
+    this.live(s);
+    s.server.on('error', () => this.end(s, '本机配对服务已中断。'));
+    direct.port = s.server.address().port;
+    return direct;
   }
 
   async join({ invite, name, relayUrl } = {}) {
@@ -250,15 +292,20 @@ class PairingNetwork extends EventEmitter {
       let ws;
       if (spec.relay) ws = await dial(s, rendezvous(spec, 'viewer'));
       else {
-        try {
-          ws = await Promise.any(spec.ips.map(ip => dial(s, 'wss://' + (isIP(ip) === 6 ? '[' + ip + ']' : ip) + ':' + spec.port + '/pair', spec.pin)));
-        } catch {
-          throw new Error('无法验证或连接共享端。请确认两端处于同一局域网或 VPN、邀请有效且防火墙允许连接。');
+        const managed = spec.managed === 1 && this.managedUrl && !relayUrl;
+        if (spec.ips) {
+          const timeout = managed ? 1000 : 5000;
+          try {
+            ws = await Promise.any(spec.ips.map(ip => dial(s, 'wss://' + (isIP(ip) === 6 ? '[' + ip + ']' : ip) + ':' + spec.port + '/pair', spec.pin, timeout)));
+          } catch { /* A managed invite can also rendezvous over HTTPS. */ }
+          for (const other of s.sockets) if (other !== ws) other.terminate();
         }
-        for (const other of s.sockets) if (other !== ws) other.terminate();
+        this.live(s);
+        if (!ws && managed) ws = await this.mailbox(s);
+        if (!ws) throw new Error('无法验证或连接共享端。请确认两端处于同一局域网或 VPN、邀请有效且防火墙允许连接。');
       }
       this.live(s);
-      const p = this.attach(s, ws, !!spec.relay);
+      const p = this.attach(s, ws, !!spec.relay || ws instanceof Mailbox);
       s.peer = p;
       p.salt = crypto.randomBytes(16);
       p.keys = channelKeys(s.secret, p.salt);
@@ -267,15 +314,18 @@ class PairingNetwork extends EventEmitter {
   }
 
   attach(s, ws, relayed) {
-    const p = { ws, role: s.role, phase: 'initial', sent: 0, received: 0 };
+    const managedWan = ws instanceof Mailbox;
+    const p = { ws, managedWan, role: s.role, phase: 'initial', sent: 0, received: 0 };
+    // Losing the unused managed route must not disconnect the selected LAN peer.
+    const required = () => s.peer === p || (!s.peer && relayed && !s.directAvailable);
     const fail = () => {
-      if (s.peer === p || relayed) this.end(s, '配对或网络连接已中断。');
+      if (required()) this.end(s, '配对或网络连接已中断。');
       else ws.terminate();
     };
     // A relay host is already connected to the rendezvous while waiting for an invite recipient.
-    if (s.role === 'viewer' || !relayed) p.timeout = setTimeout(fail, 10000);
+    if (s.role === 'viewer' || !relayed) p.timeout = setTimeout(fail, managedWan ? 35000 : 10000);
     let alive = true;
-    const heartbeat = setInterval(() => {
+    const heartbeat = managedWan ? undefined : setInterval(() => {
       if (!alive) return fail();
       alive = false;
       if (ws.readyState === WebSocket.OPEN) ws.ping();
@@ -286,7 +336,7 @@ class PairingNetwork extends EventEmitter {
       clearInterval(heartbeat);
       clearTimeout(p.timeout);
       s.sockets.delete(ws);
-      if (this.state === s && (s.peer === p || relayed)) this.end(s, '对端已断开，连接已结束。');
+      if (this.state === s && required()) this.end(s, '对端已断开，连接已结束。');
     });
     ws.on('message', (data, binary) => {
       if (this.state !== s) return;
@@ -295,6 +345,7 @@ class PairingNetwork extends EventEmitter {
         this.receive(s, p, read(p, s.secret, data));
       } catch { fail(); }
     });
+    if (managedWan) void ws.poll();
     return p;
   }
 
@@ -349,7 +400,17 @@ class PairingNetwork extends EventEmitter {
     clearTimeout(s.expires);
     clearTimeout(p.timeout);
     p.phase = 'active';
-    this.emit('event', { type: 'connected', role: s.role, name: p.name });
+    if (p.managedWan) p.ws.active = true;
+    this.emit('event', { type: 'connected', role: s.role, name: p.name, managedWan: p.managedWan });
+  }
+
+  async getManagedIceServers() {
+    const peer = this.state?.peer;
+    if (peer?.phase !== 'active' || !peer.managedWan) return [];
+    // One short-lived grant per approved endpoint, scoped to this session.
+    peer.iceGrant ??= peer.ws.ice();
+    const servers = await peer.iceGrant;
+    return this.state?.peer === peer ? servers : [];
   }
 
   signal(payload) {

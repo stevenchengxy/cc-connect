@@ -13,6 +13,7 @@ const { Updater } = require('./updater.cjs')
 const page = path.join(__dirname, 'ui', 'index.html')
 const pageUrl = pathToFileURL(page).href
 const iconPath = path.join(__dirname, 'icon.png')
+const managedUrl = 'https://cc-connect-pair.stevenchengxy19.chatgpt.site/v1'
 const inputSupported = ['darwin', 'win32'].includes(process.platform)
 const deviceName = os.hostname().replace(/\.local$/i, '').slice(0, 64) || '我的电脑'
 
@@ -108,7 +109,8 @@ function showSharingIndicator() {
 function createSession(role) {
   if (installingUpdate) throw new Error('更新任务正在进行，请稍候。')
   if (current || saveInProgress) throw new Error('请先结束当前配对，或等待网络设置保存完成。')
-  const active = { network: new PairingNetwork(), role, phase: 'pairing', allowControl: false }
+  const network = new PairingNetwork({ managedUrl: !app.isPackaged && app.commandLine.hasSwitch('test-local-pairing') ? undefined : managedUrl })
+  const active = { network, role, phase: 'pairing', allowControl: false }
   current = active
   active.network.on('event', event => {
     if (current !== active) return
@@ -124,10 +126,24 @@ function createSession(role) {
             (role === 'viewer' && active.phase !== 'pairing')) return finish('配对状态已改变')
         active.phase = 'connected'
         if (role === 'host') showSharingIndicator()
-        send({ type: 'accepted', role, name: event.name, allowControl: active.allowControl })
+        if (event.managedWan) {
+          active.pendingSignals = []
+          active.network.getManagedIceServers().then(iceServers => {
+            if (current !== active) return
+            send({ type: 'accepted', role, name: event.name, allowControl: active.allowControl, managedWan: true, managedIceServers: iceServers })
+            for (const signal of active.pendingSignals) send({ type: 'signal', signal })
+            active.pendingSignals = null
+          }).catch(() => { if (current === active) finish('公网连接初始化失败，请重新配对。') })
+        } else {
+          send({ type: 'accepted', role, name: event.name, allowControl: active.allowControl })
+        }
         break
       case 'signal':
-        if (active.phase === 'connected') send({ type: 'signal', signal: event.payload })
+        if (active.phase !== 'connected') return
+        if (active.pendingSignals) {
+          if (active.pendingSignals.length >= 128) return finish('连接消息过多，请重新配对。')
+          active.pendingSignals.push(event.payload)
+        } else send({ type: 'signal', signal: event.payload })
         break
       case 'closed':
         finish(event.reason || '对方已断开连接')

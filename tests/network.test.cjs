@@ -2,7 +2,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { randomBytes, generateKeyPairSync } = require('node:crypto');
+const { randomBytes, generateKeyPairSync, createHash } = require('node:crypto');
 const https = require('node:https');
 const tls = require('node:tls');
 const forge = require('node-forge');
@@ -38,7 +38,7 @@ async function roundTrip(t, config) {
   assert.throws(() => viewer.signal({ type: 'candidate', candidate: null }), /尚未就绪/);
   const approved = next(viewer, 'connected');
   host.respond(true);
-  assert.deepEqual(await approved, { type: 'connected', role: 'viewer', name: '共享端' });
+  assert.deepEqual(await approved, { type: 'connected', role: 'viewer', name: '共享端', managedWan: false });
   const offer = { type: 'offer', sdp: 'v=0\r\n' };
   const incoming = next(viewer, 'signal');
   host.signal(offer);
@@ -115,4 +115,120 @@ test('a configured, TLS-verified relay forwards encrypted signaling and enforces
   await assert.rejects(viewer.join({ invite, relayUrl: 'wss://example.invalid/pair' }), /两端配置相同/);
   host.stop();
   await roundTrip(t, { relayUrl });
+});
+
+function managedFixture() {
+  const rooms = new Map();
+  const attempts = [];
+  let loseFirstWriteAck = true;
+  const fetchImpl = async (url, { method, headers, body }) => {
+    const [, , , id, role, resource, sequence] = new URL(url).pathname.split('/');
+    const token = headers.authorization;
+    const result = (status, bytes = null) => new Response(bytes, { status });
+    const proof = headers['x-viewer-proof'];
+    let room = rooms.get(id);
+    attempts.push({ method, role, resource, sequence, ciphertext: body });
+    if (role === 'host' && method === 'POST' && !room) {
+      room = { host: token, proof, closed: false, hostPackets: [], viewerPackets: [] };
+      rooms.set(id, room);
+      return result(201);
+    }
+    if (!room) return result(404);
+    if (method === 'POST' && role === 'viewer') {
+      if (createHash('sha256').update(proof).digest('hex') !== room.proof) return result(403);
+      if (room.viewer && token !== room.viewer) return result(409);
+      room.viewer = token;
+      return result(201);
+    }
+    if (room[role] !== token) return result(403);
+    if (method === 'GET' && resource === 'ice') {
+      return Response.json({ iceServers: [{
+        urls: ['turn:turn.example:3478?transport=udp', 'https://example.invalid/', 'turn:bad.example:123456'],
+        username: 'short-lived', credential: 'fixture'
+      }] });
+    }
+    if (method === 'PUT' && !room.closed) {
+      const index = Number(sequence) - 1;
+      const packets = room[role + 'Packets'];
+      if (packets[index]) assert.deepEqual(packets[index], body);
+      packets[index] = body;
+      if (loseFirstWriteAck) { loseFirstWriteAck = false; return result(503); }
+      return result(204);
+    }
+    if (method === 'DELETE') { room.closed = true; return result(204); }
+    const packets = role === 'host' ? room.viewerPackets : room.hostPackets;
+    const message = packets[Number(sequence) - 1];
+    if (message) return result(200, message);
+    return result(room.closed ? 410 : 204);
+  };
+  return { managedUrl: 'https://relay.example/v1', fetchImpl, attempts };
+}
+
+test('managed pairing reaches the approved peer when every LAN address is unreachable', async t => {
+  const fixture = managedFixture();
+  const host = new PairingNetwork(fixture);
+  const viewer = new PairingNetwork(fixture);
+  const duplicate = new PairingNetwork(fixture);
+  t.after(() => { viewer.stop(); host.stop(); duplicate.stop(); });
+  const { invite, internetAvailable } = await host.host({ address: '127.0.0.1' });
+  assert.equal(internetAvailable, true);
+  const inaccessible = change(invite, { port: 1 });
+  const request = next(host, 'request');
+  await viewer.join({ invite: inaccessible, name: 'wan-viewer' });
+  assert.equal((await request).name, 'wan-viewer');
+  assert.deepEqual(await host.getManagedIceServers(), []);
+  assert.deepEqual(await viewer.getManagedIceServers(), []);
+  assert.throws(() => viewer.signal({ type: 'candidate', candidate: null }), /尚未就绪/);
+  await assert.rejects(duplicate.join({ invite: inaccessible }), /信令服务/);
+  const connected = next(viewer, 'connected');
+  host.respond(true);
+  assert.equal((await connected).managedWan, true);
+  const grants = await Promise.all([viewer.getManagedIceServers(), viewer.getManagedIceServers()]);
+  assert.deepEqual(grants[0], [{urls:['turn:turn.example:3478?transport=udp'], username:'short-lived', credential:'fixture'}]);
+  assert.deepEqual(grants[1], grants[0]);
+  assert.equal(fixture.attempts.filter(item => item.resource === 'ice').length, 1);
+  const received = next(host, 'signal');
+  const offer = { type: 'offer', sdp: 'private-sdp' };
+  viewer.signal(offer);
+  assert.deepEqual((await received).payload, offer);
+  assert(!fixture.attempts.some(item => item.ciphertext?.includes('private-sdp')));
+  assert(fixture.attempts.filter(item => item.method === 'PUT' && item.role === 'viewer' && item.sequence === '1').length > 1);
+  const disconnected = next(host, 'closed');
+  viewer.stop();
+  await disconnected;
+});
+
+test('hybrid invites prefer pinned LAN and keep the direct session after closing the managed route', async t => {
+  const fixture = managedFixture();
+  const host = new PairingNetwork(fixture);
+  const viewer = new PairingNetwork(fixture);
+  t.after(() => { viewer.stop(); host.stop(); });
+  const { invite, internetAvailable } = await host.host({ address: '127.0.0.1' });
+  assert.equal(internetAvailable, true);
+  const request = next(host, 'request');
+  await viewer.join({ invite });
+  await request;
+  const allowed = next(viewer, 'connected');
+  host.respond(true);
+  assert.equal((await allowed).managedWan, false);
+  assert(!fixture.attempts.some(item => item.role === 'viewer'));
+  const received = next(host, 'signal');
+  viewer.signal({ type: 'candidate', candidate: null });
+  await received;
+});
+
+test('managed service failure produces a usable invite compatible with LAN-only clients', async t => {
+  const host = new PairingNetwork({ managedUrl: 'https://relay.example/v1', fetchImpl: async () => { throw new Error('offline'); } });
+  const viewer = new PairingNetwork();
+  t.after(() => { viewer.stop(); host.stop(); });
+  const { invite, internetAvailable } = await host.host({ address: '127.0.0.1' });
+  assert.equal(internetAvailable, false);
+  const spec = JSON.parse(Buffer.from(invite.slice(4), 'base64url'));
+  assert.equal(spec.managed, undefined);
+  const request = next(host, 'request');
+  await viewer.join({ invite });
+  await request;
+  const rejected = next(viewer, 'closed');
+  host.respond(false);
+  assert.match((await rejected).reason, /拒绝/);
 });
