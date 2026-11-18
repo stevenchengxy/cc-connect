@@ -39,6 +39,11 @@ internal static class NativeWindowCheck
         return false;
     }
     static void Require(bool ok, string why) { if(!ok) throw new InvalidOperationException(why); }
+    static void SendAscii(Process helper, string line) {
+        byte[] bytes=System.Text.Encoding.ASCII.GetBytes(line+"\n");
+        var pipe=helper.StandardInput.BaseStream;
+        pipe.Write(bytes,0,bytes.Length); pipe.Flush();
+    }
 
     [STAThread] static int Main() {
         if(Environment.GetEnvironmentVariable("GITHUB_ACTIONS")!="true" || Environment.GetEnvironmentVariable("CC_QA_RUNNER_CLASS")!="github-hosted" ||
@@ -53,16 +58,20 @@ internal static class NativeWindowCheck
         Rectangle screen=Screen.PrimaryScreen.Bounds;
         if(screen.Width<400 || screen.Height<300) return Skip("No usable display");
         f.FormBorderStyle=FormBorderStyle.None;
+        f.AutoScaleMode=AutoScaleMode.None;
         f.StartPosition=FormStartPosition.Manual;
         f.Bounds=new Rectangle(screen.Left+(screen.Width-300)/2,screen.Top+(screen.Height-220)/2,300,220);
         f.Text="CC Connect isolated native input check"; f.TopMost=true; f.KeyPreview=true; f.BackColor=Start;
-        bool down=false,up=false,aDown=false,aUp=false;
-        f.MouseDown+=(s,e)=> { down=e.Button==MouseButtons.Left && Math.Abs(e.X-150)<=2 && Math.Abs(e.Y-110)<=2; };
-        f.MouseUp+=(s,e)=> { if(down && e.Button==MouseButtons.Left) {up=true; f.BackColor=Click; f.Refresh();} };
+        var localCenter = new Point(f.ClientSize.Width/2,f.ClientSize.Height/2);
+        bool down=false,up=false,aDown=false,aUp=false; int mouseDownEvents=0; string lastMouse="none";
+        f.MouseDown+=(s,e)=> { mouseDownEvents++; lastMouse="Down "+e.Button+" at "+e.Location;
+            down=e.Button==MouseButtons.Left && Math.Abs(e.X-localCenter.X)<=2 && Math.Abs(e.Y-localCenter.Y)<=2; };
+        f.MouseUp+=(s,e)=> { lastMouse="Up "+e.Button+" at "+e.Location;
+            if(down && e.Button==MouseButtons.Left) {up=true; f.BackColor=Click; f.Refresh();} };
         f.KeyDown+=(s,e)=> { if(up && e.KeyData==Keys.A) aDown=true; };
         f.KeyUp+=(s,e)=> { if(aDown && e.KeyData==Keys.A) {aUp=true; f.BackColor=Typed; f.Refresh();} };
         f.Show(); f.Activate(); f.Focus(); f.Refresh();
-        Point center=f.PointToScreen(new Point(150,110)), sample=f.PointToScreen(new Point(95,70));
+        Point center=f.PointToScreen(localCenter), sample=f.PointToScreen(new Point(95,70));
         if(!Observe(()=>OwnsTarget(f,center,sample),2000)) return Skip("The fixture cannot obtain foreground keyboard and mouse focus");
         try { if(!Pixel(sample,Start)) return Skip("Fixture pixels unavailable on the Windows desktop"); }
         catch(System.ComponentModel.Win32Exception) { return Skip("Windows desktop capture unavailable"); }
@@ -74,16 +83,29 @@ internal static class NativeWindowCheck
             try {
                 var ready=helper.StandardOutput.ReadLineAsync();
                 Require(ready.Wait(5000) && ready.Result=="READY","Release helper failed to initialize");
+                // Consume any console-encoding preamble written by .NET's redirected
+                // StreamWriter, then send the same BOM-free bytes as the Node bridge.
+                SendAscii(helper,"");
                 double x=(double)(center.X-screen.Left)/(screen.Width-1), y=(double)(center.Y-screen.Top)/(screen.Height-1);
                 string point=x.ToString("R",ci)+" "+y.ToString("R",ci);
                 if(!OwnsTarget(f,center,sample)) return Skip("Fixture lost focus before input");
                 // One click inside the owned form. Wait for release and visibly updated pixels.
-                helper.StandardInput.WriteLine("button 0 1 "+point); helper.StandardInput.WriteLine("button 0 0 "+point); helper.StandardInput.Flush();
+                SendAscii(helper,"button 0 1 "+point);
+                if(!Observe(()=>down,3000)) {
+                    string detail=helper.HasExited ? "helper exit="+helper.ExitCode+" "+helper.StandardOutput.ReadToEnd().Trim() : "helper still running";
+                    throw new InvalidOperationException("Center MouseDown missing: formEvents="+mouseDownEvents+", lastOwnFormEvent="+lastMouse+", expected="+localCenter+
+                        ", cursorAtCenter="+(Cursor.Position==center)+", ownsTarget="+OwnsTarget(f,center,sample)+", "+detail);
+                }
+                if(!OwnsTarget(f,center,sample)) return Skip("Fixture lost focus during click");
+                SendAscii(helper,"button 0 0 "+point);
                 Require(Observe(()=>up,3000),"Test form did not receive center click");
                 if(!OwnsTarget(f,center,sample)) return Skip("Fixture lost focus before KeyA");
                 Require(Pixel(sample,Click),"Clicked window did not show expected color");
                 // Physical KeyA is the single fixed scan code used in this fixture.
-                helper.StandardInput.WriteLine("key 30 1"); helper.StandardInput.WriteLine("key 30 0"); helper.StandardInput.Flush();
+                SendAscii(helper,"key 30 1");
+                Require(Observe(()=>aDown,3000),"Test form did not receive KeyA press");
+                if(!OwnsTarget(f,center,sample)) return Skip("Fixture lost focus during KeyA");
+                SendAscii(helper,"key 30 0");
                 Require(Observe(()=>aUp,3000),"Test form did not receive KeyA press and release");
                 if(!OwnsTarget(f,center,sample)) return Skip("Fixture lost focus before pixel verification");
                 Require(Pixel(sample,Typed),"Window pixels did not change after KeyA");

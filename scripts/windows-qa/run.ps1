@@ -16,6 +16,8 @@ $tempDir = Join-Path $env:RUNNER_TEMP ('cc-native-qa-' + [Guid]::NewGuid().ToStr
 New-Item -ItemType Directory -Path $tempDir | Out-Null
 try {
   $version = (Get-Content -Raw -LiteralPath (Join-Path $root 'package.json') | ConvertFrom-Json).version
+  if ($env:CC_QA_RELEASE -eq '0.3.2') { $version = '0.3.2' }
+  elseif ($env:CC_QA_RELEASE -and $env:CC_QA_RELEASE -ne 'current') { throw 'Unsupported QA release choice.' }
   if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid release version.' }
   $name = "CC-Connect-$version-x64.exe"
   $base = "https://github.com/stevenchengxy/cc-connect/releases/download/v$version"
@@ -27,7 +29,7 @@ try {
 const fs=require('node:fs'), path=require('node:path'), crypto=require('node:crypto');
 const assert=require('node:assert/strict');
 const dir=process.argv[2];
-const {version}=require('./package.json');
+const version=process.argv[3];
 const release=require('./src/updater.cjs').verifyManifest(JSON.parse(fs.readFileSync(path.join(dir,'latest.json'))),fs.readFileSync('src/update-public-key.pem'));
 assert.equal(release.version,version);
 const windows=release.files.windows;
@@ -36,7 +38,7 @@ const installer=fs.readFileSync(path.join(dir, windows.name));
 assert.equal(installer.length,windows.size);
 assert.equal(crypto.createHash('sha256').update(installer).digest('hex'),windows.sha256);
 console.log('Verified signed Windows release '+version);
-'@ | node - $tempDir
+'@ | node - $tempDir $version
     if ($LASTEXITCODE -ne 0) { throw 'Release verification failed.' }
   } finally { Pop-Location }
   # Extract only the application archive and helper. The installer never runs.

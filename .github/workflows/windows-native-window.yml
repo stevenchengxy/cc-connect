@@ -1,6 +1,14 @@
 name: Windows native window acceptance
 on:
   workflow_dispatch:
+    inputs:
+      release:
+        description: Signed release to verify
+        type: choice
+        default: current
+        options:
+          - current
+          - '0.3.2'
 permissions:
   contents: read
 jobs:
@@ -16,4 +24,5 @@ jobs:
         shell: pwsh
         env:
           CC_QA_RUNNER_CLASS: ${{ runner.environment }}
+          CC_QA_RELEASE: ${{ inputs.release }}
         run: ./scripts/windows-qa/run.ps1
