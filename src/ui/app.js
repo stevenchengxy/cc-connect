@@ -20,6 +20,8 @@ let phase = 'idle';
 let generation = 0;
 let room = null;
 let peerName = '';
+let pendingRequest = null;
+let settingsCheck = null;
 let expiryTimer;
 let joinTimer;
 let quality = 'balanced';
@@ -37,6 +39,26 @@ function notice(id, message = '', error = false) {
 function describeError(error) {
   return translate(String(error?.message || error || '连接失败，请重试。')
     .replace(/^Error invoking remote method '[^']+': (?:Error: )?/, ''));
+}
+const screenErrors = {
+  'permission-denied':'在录屏设置中允许当前安装的 CC Connect 共享画面。若系统提示重新打开应用，请按提示操作。',
+  'permission-pending':'macOS 尚未确认录屏权限。请点「重新读取」请求授权。若录屏设置已开启仍有此提示，请重新添加「应用程序」里的 CC Connect。',
+  'permission-restricted':'系统策略限制了录屏，请联系设备管理员。',
+  'source-unavailable':'系统暂时无法列出屏幕。请解锁共享端并确认显示器已唤醒，然后重新读取。',
+  'no-displays':'系统没有找到可共享的显示器。请接入或唤醒显示器，然后重新读取。'
+};
+function screenErrorMessage(code, permission) {
+  if (code === 'source-unavailable' && permission === 'granted') {
+    return t('录屏权限已开启，但系统暂时无法列出屏幕。请解锁本机、唤醒显示器后重新读取。');
+  }
+  return t(screenErrors[code] || screenErrors['source-unavailable']);
+}
+function needsRecordingSettings(code) {
+  return info.platform === 'darwin' && ['permission-denied','permission-pending'].includes(code);
+}
+function label(id, key) {
+  $(id).dataset.i18n = key;
+  $(id).textContent = t(key);
 }
 // Resize only when the label, locale or session controls change, never on animation frames.
 const islandSizes = new ResizeObserver(entries => {
@@ -236,6 +258,7 @@ function cleanRoom() {
 }
 function backHome(message, error = false) {
   generation++;
+  pendingRequest = null;
   clearInterval(expiryTimer);
   clearTimeout(joinTimer);
   cleanRoom();
@@ -248,6 +271,7 @@ function backHome(message, error = false) {
   $('session').hidden = true;
   $('home').hidden = false;
   $('resume-capture').hidden = true;
+  $('session-screen-settings').hidden = true;
   $('video-wait').hidden = false;
   notice('session-notice');
   notice('home-notice', message, error);
@@ -348,12 +372,45 @@ $('settings-button').onclick = () => {
   $('turn-password').value = '';
   $('turn-password').placeholder = info.turnConfigured ? t('已保存') : '';
   notice('settings-notice');
+  settingsCheck = null;
+  renderScreenCheck();
   $('settings-dialog').showModal();
 };
 function closeSettings() { $('turn-password').value = ''; $('settings-dialog').close(); }
 $('close-settings').onclick = closeSettings;
 $('cancel-settings').onclick = closeSettings;
 $('settings-dialog').onclose = () => { $('turn-password').value = ''; };
+function renderScreenCheck() {
+  const check = settingsCheck;
+  $('screen-check').disabled = !!check?.pending;
+  label('screen-check', check && !check.pending ? '重新读取' : '检测屏幕');
+  $('settings-screen-settings').hidden = !needsRecordingSettings(check?.errorCode);
+  if (!check) return notice('screen-check-result');
+  if (check.pending) return notice('screen-check-result', '正在读取屏幕…');
+  if (check.errorCode) return notice('screen-check-result', screenErrorMessage(check.errorCode,check.permission), true);
+  notice('screen-check-result', t('可共享的屏幕数量：{count}。', {count:check.screenCount}));
+}
+$('screen-check').onclick = async () => {
+  if (settingsCheck?.pending) return;
+  const check = settingsCheck = {pending:true};
+  renderScreenCheck();
+  try {
+    const result = await api.screenStatus();
+    if (settingsCheck !== check || !$('settings-dialog').open) return;
+    settingsCheck = result;
+  } catch {
+    if (settingsCheck !== check || !$('settings-dialog').open) return;
+    settingsCheck = {errorCode:'source-unavailable'};
+  }
+  renderScreenCheck();
+};
+async function openRecordingSettings(noticeId) {
+  try { await api.openScreenSettings(); }
+  catch (e) { notice(noticeId,describeError(e),true); }
+}
+$('settings-screen-settings').onclick = () => openRecordingSettings('screen-check-result');
+$('consent-screen-settings').onclick = () => openRecordingSettings('consent-notice');
+$('session-screen-settings').onclick = () => openRecordingSettings('session-notice');
 $('settings-form').onsubmit = async (event) => {
   event.preventDefault();
   if (phase !== 'idle' || account.status !== 'approved' || !$('advanced-settings').open) return;
@@ -369,49 +426,112 @@ $('settings-form').onsubmit = async (event) => {
   finally { $('save-settings').disabled = false; }
 };
 
+function currentRequest(request) {
+  return request && request === pendingRequest && !request.declining && request.generation === generation && phase === 'request';
+}
+function showSourceFailure(code) {
+  $('screens').replaceChildren(new Option(t('暂无可选屏幕'),''));
+  $('screens').disabled = true;
+  $('allow-control').checked = false;
+  $('allow-control').disabled = true;
+  $('accept').disabled = true;
+  $('screen-recovery').hidden = false;
+  $('consent-screen-settings').hidden = !needsRecordingSettings(code);
+  const offerPicker = !!info.canUseSystemPicker && Object.hasOwn(screenErrors,code) && code !== 'permission-restricted';
+  $('use-system-picker').hidden = !offerPicker;
+  $('accept').hidden = offerPicker;
+  notice('consent-notice',screenErrorMessage(code),true);
+}
+async function readConsentScreens(retry = false) {
+  const request = pendingRequest;
+  if (!currentRequest(request) || request.busy) return;
+  request.busy = true;
+  $('retry-screens').disabled = true;
+  $('screens').disabled = true;
+  $('screens').replaceChildren(new Option(t('正在读取屏幕…'),''));
+  $('accept').disabled = true;
+  $('accept').hidden = false;
+  $('use-system-picker').hidden = true;
+  $('allow-control').disabled = true;
+  notice('consent-notice');
+  try {
+    const screens = await api.screens(request.id,retry);
+    if (!currentRequest(request)) return;
+    if (!screens.length) { showSourceFailure('no-displays'); return; }
+    $('screens').replaceChildren(...screens.map((screen, index) =>
+      new Option(screen.name ? translate(screen.name) : t('屏幕 {number}', {number:index + 1}), screen.id, false, !!screen.primary)));
+    $('screens').disabled = false;
+    $('screen-recovery').hidden = true;
+    $('allow-control').disabled = !info.inputSupported;
+    $('accept').disabled = false;
+  } catch (e) {
+    if (currentRequest(request)) showSourceFailure(describeError(e));
+  } finally {
+    if (currentRequest(request)) {
+      request.busy = false;
+      $('retry-screens').disabled = false;
+    }
+  }
+}
 async function requestConsent(event) {
   if (!['listening','opening'].includes(phase)) return;
   expandIsland(false);
   if ($('settings-dialog').open) closeSettings();
   phase = 'request'; syncHome();
-  const token = generation;
+  pendingRequest = {id:event.requestId, generation, busy:false};
   peerName = event.name || t('远端设备');
   setStatus('收到连接请求', 'pending');
   $('consent-title').textContent = t('允许「{name}」查看屏幕？', {name:peerName});
   $('allow-control').checked = false;
-  $('allow-control').disabled = !info.inputSupported;
-  $('control-note').textContent = info.inputSupported ? '' : t('本机仅支持观看。');
-  $('control-note').hidden = !!info.inputSupported;
-  $('screens').replaceChildren(new Option(t('正在读取屏幕…'),''));
-  $('accept').disabled = true;
-  notice('consent-notice');
+  const controlNote = !info.inputSupported ? '本机仅支持观看。' : info.platform === 'darwin'
+    ? '录屏权限用于共享画面。允许键鼠控制还需要 macOS 的「辅助功能」权限。' : '';
+  $('control-note').textContent = t(controlNote);
+  $('control-note').hidden = !controlNote;
+  $('screen-recovery').hidden = true;
+  $('consent-screen-settings').hidden = true;
+  $('use-system-picker').disabled = false;
+  $('reject').disabled = false;
   $('consent').showModal();
-  try {
-    const screens = await api.screens();
-    if (generation !== token || phase !== 'request') return;
-    $('screens').replaceChildren(...screens.map((screen, index) =>
-      new Option(screen.name ? translate(screen.name) : t('屏幕 {number}', {number:index + 1}), screen.id, false, !!screen.primary)));
-    if (!screens.length) throw new Error('未找到可共享的屏幕，请检查系统屏幕录制权限。');
-    $('accept').disabled = false;
-  } catch (e) { if (generation === token) notice('consent-notice', describeError(e), true); }
+  await readConsentScreens();
 }
-$('consent-form').onsubmit = async (event) => {
-  event.preventDefault();
-  if (phase !== 'request' || !$('screens').value) return;
-  const token = generation;
+$('retry-screens').onclick = () => readConsentScreens(true);
+async function acceptScreen(usePicker) {
+  const request = pendingRequest;
+  if (!currentRequest(request) || request.busy) return;
+  if (usePicker ? $('use-system-picker').hidden : !$('screens').value || $('accept').disabled) return;
+  request.busy = true;
+  $('use-system-picker').disabled = true;
+  $('retry-screens').disabled = true;
   $('accept').disabled = true;
-  try { await api.accept($('allow-control').checked, $('screens').value); }
-  catch (e) {
-    if (generation === token && phase === 'request') {
-      notice('consent-notice', describeError(e), true);
-      $('accept').disabled = false;
+  $('reject').disabled = true;
+  try {
+    await api.accept(!usePicker && $('allow-control').checked, usePicker ? 'system-picker' : $('screens').value, request.id);
+  } catch (e) {
+    if (!currentRequest(request)) return;
+    const message = describeError(e);
+    if (Object.hasOwn(screenErrors,message)) showSourceFailure(message);
+    else {
+      notice('consent-notice',message,true);
+      $('screen-recovery').hidden = false;
+      $('accept').disabled = !$('screens').value;
     }
+    $('reject').disabled = false;
+    $('use-system-picker').disabled = false;
+    $('retry-screens').disabled = false;
+    request.busy = false;
   }
+}
+$('consent-form').onsubmit = (event) => {
+  event.preventDefault();
+  void acceptScreen(false);
 };
+$('use-system-picker').onclick = () => acceptScreen(true);
 async function rejectRequest() {
-  if (phase !== 'request') return;
+  if (!currentRequest(pendingRequest) || $('reject').disabled) return;
+  pendingRequest.declining = true;
+  $('reject').disabled = true;
   const token = generation;
-  try { await api.reject(); }
+  try { await api.reject(pendingRequest.id); }
   catch (e) { if (token === generation) await disconnect(describeError(e), true); return; }
   if (token === generation) backHome('已拒绝连接请求。');
 }
@@ -627,6 +747,8 @@ function renewGrant(value, answering = false) {
 
 function startSession(event) {
   if (!['request','joining'].includes(phase)) return;
+  if (event.role === 'host' && event.requestId !== pendingRequest?.id) return;
+  pendingRequest = null;
   clearInterval(expiryTimer); clearTimeout(joinTimer);
   if ($('consent').open) $('consent').close();
   phase = 'session';
@@ -646,8 +768,10 @@ function startSession(event) {
   const managedServers = event.managedWan && Array.isArray(event.managedIceServers) ? event.managedIceServers : [];
   if (event.managedWan) iceServers.push({urls:'stun:stun.cloudflare.com:3478'});
   const pc = new RTCPeerConnection({iceServers:[...iceServers,...managedServers]});
+  const systemPicker = host && event.captureMode === 'system-picker';
   const value = room = {
-    pc, baseIce:iceServers, managedURLs:new Set(managedServers.flatMap(server => [server.urls].flat())), role:host ? 'host' : 'viewer', allowControl:host && event.allowControl === true,
+    pc, baseIce:iceServers, managedURLs:new Set(managedServers.flatMap(server => [server.urls].flat())), role:host ? 'host' : 'viewer',
+    requestId:event.requestId, systemPicker, allowControl:host && !systemPicker && event.allowControl === true,
     profile:'balanced', managedWan:event.managedWan === true,
     managedIceUnavailable:event.managedIceUnavailable === true,
     managedTurn:managedServers.some(server => [server.urls].flat().some(url => /^turns?:/i.test(url))),
@@ -677,18 +801,41 @@ function startSession(event) {
   },90_000);
   if (host) {
     attachChannel(value,pc.createDataChannel('jianping-control-v1',{ordered:true}));
-    void capture(value);
+    if (systemPicker) {
+      label('sharing-title','使用系统选择器共享画面');
+      label('resume-capture','选择共享画面');
+      $('resume-capture').hidden = false;
+    } else void capture(value);
   }
+}
+async function captureScreen(value) {
+  if (!value.systemPicker) {
+    return navigator.mediaDevices.getDisplayMedia({
+      audio:false, video:{frameRate:{ideal:60,max:60},width:{ideal:2560},height:{ideal:1440}}
+    });
+  }
+  const armId = await api.armSystemPicker(value.requestId);
+  let stream;
+  try {
+    if (isCurrent(value)) stream = await navigator.mediaDevices.getDisplayMedia({audio:false,video:true});
+  } finally {
+    try {
+      const released = await api.disarmSystemPicker(armId);
+      if (!released && stream) throw new Error('连接已结束。');
+    }
+    catch (e) { stream?.getTracks().forEach(track => track.stop()); throw e; }
+  }
+  return stream;
 }
 async function capture(value) {
   if (!isCurrent(value) || value.capturing || value.stream) return;
   value.capturing = true;
   $('resume-capture').hidden = true;
+  $('session-screen-settings').hidden = true;
+  notice('session-notice');
   try {
-    const stream = await navigator.mediaDevices.getDisplayMedia({
-      audio:false, video:{frameRate:{ideal:60,max:60},width:{ideal:2560},height:{ideal:1440}},
-    });
-    if (!isCurrent(value)) { stream.getTracks().forEach(t => t.stop()); return; }
+    const stream = await captureScreen(value);
+    if (!isCurrent(value)) { stream?.getTracks().forEach(t => t.stop()); return; }
     value.stream = stream;
     const track = stream.getVideoTracks()[0];
     if (!track) throw new Error('未获取到屏幕画面。');
@@ -700,15 +847,21 @@ async function capture(value) {
     if (isCurrent(value)) await api.signal({type:'offer',sdp:value.pc.localDescription.sdp});
   } catch (e) {
     if (!isCurrent(value)) return;
-    if (e.name === 'InvalidStateError' && !value.stream) {
-      $('sharing-title').dataset.i18n = '点击开始共享此屏幕';
-      $('sharing-title').textContent = t('点击开始共享此屏幕');
-      $('resume-capture').hidden = false;
-    } else {
-      terminate(value, e.name === 'NotAllowedError' || e.name === 'NotReadableError'
-        ? '系统未允许读取屏幕。请在系统设置中允许CC Connect录制屏幕，重新打开应用后再连接。'
-        : describeError(e));
+    if (value.stream) { terminate(value,describeError(e)); return; }
+    let message = '';
+    if (value.systemPicker) {
+      const code = describeError(e);
+      if (code === 'permission-restricted') { terminate(value,screenErrorMessage(code)); return; }
+      message = ['NotAllowedError','AbortError'].includes(e.name)
+        ? '尚未选择画面。可以重新选择，或结束连接。' : '系统暂时无法读取所选画面。请重新选择或结束连接。';
+    } else if (e.name !== 'InvalidStateError') {
+      message = '暂时无法读取画面。请确认所选显示器已连接并唤醒，然后重试。';
     }
+    notice('session-notice',message,!!message);
+    label('sharing-title', value.systemPicker ? '使用系统选择器共享画面' : '点击开始共享此屏幕');
+    label('resume-capture', value.systemPicker ? '选择共享画面' : '重试共享');
+    $('resume-capture').hidden = false;
+    $('session-screen-settings').hidden = value.systemPicker || info.platform !== 'darwin' || e.name !== 'NotAllowedError';
   } finally { value.capturing = false; }
 }
 $('resume-capture').onclick = () => { if (room?.role === 'host') void capture(room); };
@@ -926,6 +1079,7 @@ function refreshLanguage() {
   $('language-select').value = i18n.getLanguage();
   window.ccSelects?.refresh();
   renderUpdate();
+  renderScreenCheck();
   renderIslandDetails();
   if (room) {
     showPermission(room);

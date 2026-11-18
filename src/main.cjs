@@ -1,7 +1,8 @@
 const {
   app, BrowserWindow, clipboard, desktopCapturer, dialog, ipcMain, Menu, nativeImage, net, powerMonitor,
-  safeStorage, screen, session, systemPreferences, Tray
+  safeStorage, screen, session, shell, systemPreferences, Tray
 } = require('electron')
+const { randomUUID } = require('node:crypto')
 const os = require('node:os')
 const path = require('node:path')
 const { pathToFileURL } = require('node:url')
@@ -12,6 +13,7 @@ const { DesktopAccount, messages } = require('./account.cjs')
 const { AdminConsole } = require('./admin-console.cjs')
 const { Updater } = require('./updater.cjs')
 const { systemUpdateTransport } = require('./update-transport.cjs')
+const { ScreenCapture, ScreenChoices, permissionErrors } = require('./screen-capture.cjs')
 
 const page = path.join(__dirname, 'ui', 'index.html')
 const pageUrl = pathToFileURL(page).href
@@ -19,6 +21,13 @@ const iconPath = path.join(__dirname, 'icon.png')
 const managedUrl = 'https://cc-connect-pair.stevenchengxy19.chatgpt.site/v1'
 const inputSupported = ['darwin', 'win32'].includes(process.platform)
 const deviceName = os.hostname().replace(/\.local$/i, '').slice(0, 64) || '我的电脑'
+const capture = new ScreenCapture({
+  platform: process.platform, systemVersion: process.platform === 'darwin' ? process.getSystemVersion() : '',
+  getPermission: kind => systemPreferences.getMediaAccessStatus(kind),
+  getSources: options => desktopCapturer.getSources(options)
+})
+let displayRevision = 0
+let pickerGrant
 
 // Preserve the original application's local settings and permission identity.
 const fs = require('node:fs')
@@ -87,6 +96,7 @@ function finish(reason = '连接已结束', error = false) {
   const active = current
   current = null
   if (!active) return
+  if (pickerGrant) disarmSystemPicker(pickerGrant.id)
   active.allowControl = false
   active.input?.stop()
   active.network.stop()
@@ -94,6 +104,9 @@ function finish(reason = '连接已结束', error = false) {
   tray = null
   if (window && !window.isDestroyed()) window.setTitle('CC Connect')
   send({ type: 'closed', reason, error })
+  // A revoked room may lose its data channel before the signaling server's
+  // close arrives. Recheck the same account whichever side noticed first.
+  if (account.approvedToken === active.token) void account.refresh().catch(() => {})
 }
 
 function showSharingIndicator() {
@@ -119,7 +132,7 @@ function createSession(role, token) {
     managedUrl, accountOnly: true, accountToken: token,
     fetchImpl: (url, init) => session.defaultSession.fetch(url, { ...init, credentials: 'omit' })
   })
-  const active = { network, role, token, phase: 'pairing', allowControl: false }
+  const active = { network, role, token, phase: 'pairing', requestId: randomUUID(), allowControl: false }
   current = active
   active.network.on('event', event => {
     if (current !== active) return
@@ -128,25 +141,28 @@ function createSession(role, token) {
         if (active.role !== 'host' || active.phase !== 'pairing') return
         active.phase = 'pending'
         window.show()
-        send({ type: 'request', name: event.name })
+        send({ type: 'request', name: event.name, requestId: active.requestId })
         break
-      case 'connected':
+      case 'connected': {
         if ((role === 'host' && active.phase !== 'approving') ||
             (role === 'viewer' && active.phase !== 'pairing')) return finish('配对状态已改变')
         active.phase = 'connected'
         if (role === 'host') showSharingIndicator()
+        const accepted = { type: 'accepted', role, name: event.name, allowControl: active.allowControl,
+          requestId: active.requestId, captureMode: active.captureMode || 'screen' }
         if (event.managedWan) {
           active.pendingSignals = []
           active.network.getManagedIceServers().then(iceServers => {
             if (current !== active) return
-            send({ type: 'accepted', role, name: event.name, allowControl: active.allowControl, managedWan: true, managedIceServers: iceServers, managedIceExpiresAt: active.network.managedIceExpiresAt, managedIceUnavailable: active.network.managedIceUnavailable })
+            send({ ...accepted, allowControl: active.allowControl, managedWan: true, managedIceServers: iceServers, managedIceExpiresAt: active.network.managedIceExpiresAt, managedIceUnavailable: active.network.managedIceUnavailable })
             for (const signal of active.pendingSignals) send({ type: 'signal', signal })
             active.pendingSignals = null
           }).catch(() => { if (current === active) finish('公网连接初始化失败，请重新配对。') })
         } else {
-          send({ type: 'accepted', role, name: event.name, allowControl: active.allowControl })
+          send(accepted)
         }
         break
+      }
       case 'signal':
         if (active.phase !== 'connected') return
         if (active.pendingSignals) {
@@ -156,25 +172,16 @@ function createSession(role, token) {
         break
       case 'closed':
         finish(event.reason || '对方已断开连接')
-        void account.refresh().catch(() => {})
         break
     }
   })
   return active
 }
 
-function requirePending() {
-  if (!current || current.role !== 'host' || current.phase !== 'pending') throw new Error('连接请求已失效。')
+function requirePending(requestId) {
+  if (!current || current.requestId !== requestId || current.role !== 'host' || current.phase !== 'pending' ||
+      current.token !== account.approvedToken) throw new Error('连接请求已失效。')
   return current
-}
-
-async function listScreens() {
-  const sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 0, height: 0 } })
-  if (process.platform === 'darwin' && systemPreferences.getMediaAccessStatus('screen') === 'denied') {
-    throw new Error('请在「系统设置 → 隐私与安全性 → 屏幕与系统音频录制」中允许CC Connect，然后重新打开应用。')
-  }
-  if (!sources.length) throw new Error('没有可共享的屏幕。请检查系统的屏幕录制权限。')
-  return sources
 }
 
 function disableInput(active, message) {
@@ -208,6 +215,7 @@ function registerHandlers() {
     const token = account.approvedToken
     const config = token ? await preferences.getPublic() : null
     return {name:deviceName, platform:process.platform, version:app.getVersion(), inputSupported, language,
+      canUseSystemPicker:capture.canUseSystemPicker,
       update:updater.getState(), ...(token && token === account.approvedToken ? config : {}), account:account.state}
   })
   handle('account-login', values => account.login(values))
@@ -215,6 +223,13 @@ function registerHandlers() {
   handle('account-refresh', () => account.refresh())
   handle('open-admin-console', () => adminConsole.open(window, language))
   handle('account-logout', () => account.logout())
+  handle('screen-status', async () => (await capture.inspect(true)).report)
+  handle('open-screen-settings', async () => {
+    if (process.platform !== 'darwin') throw new Error('source-unavailable')
+    await shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture')
+  })
+  handle('arm-system-picker', armSystemPicker)
+  handle('disarm-system-picker', disarmSystemPicker)
   handle('renew-ice', async () => {
     const active = current
     if (!active || active.phase !== 'connected' || active.token !== account.approvedToken) throw new Error(messages.account_required)
@@ -255,27 +270,39 @@ function registerHandlers() {
       }
     })
   }
-  handle('screens', async () => {
-    const active = requirePending()
-    const sources = await listScreens()
-    if (current !== active) throw new Error('连接请求已失效。')
-    const primaryId = String(screen.getPrimaryDisplay().id)
-    const displays = screen.getAllDisplays()
-    return sources.map((item, index) => {
-      const display = displays.find(display => String(display.id) === item.display_id)
-      return { id: item.id, name: display?.label || item.name || ('屏幕 ' + (index + 1)), primary: item.display_id === primaryId }
-    })
+  handle('screens', async (requestId, explicitCheck) => {
+    const active = requirePending(requestId)
+    const attempt = active.listAttempt = (active.listAttempt || 0) + 1
+    active.choices = null
+    active.screenError = null
+    const revision = displayRevision
+    const { sources, report } = await capture.inspect(explicitCheck === true)
+    requirePending(requestId)
+    if (active.listAttempt !== attempt) throw new Error('连接请求已失效。')
+    active.screenError = report.errorCode || (revision !== displayRevision ? 'source-unavailable' : null)
+    if (active.screenError) throw new Error(active.screenError)
+    active.choices = new ScreenChoices(sources, screen.getAllDisplays(), screen.getPrimaryDisplay().id, revision)
+    return active.choices.options
   })
-  handle('accept', async (allowControl, screenId) => {
-    const active = requirePending()
+  handle('accept', async (allowControl, screenId, requestId) => {
+    const active = requirePending(requestId)
     active.phase = 'approving'
     try {
       if (await account.requireApproved() !== active.token || current !== active) throw new Error('连接请求已失效。')
-      const sources = await listScreens()
-      if (current !== active) throw new Error('连接请求已失效。')
-      active.source = sources.find(item => item.id === screenId)
-      if (!active.source) throw new Error('选定的屏幕已经断开，请重新选择。')
-      active.display = screen.getAllDisplays().find(item => String(item.id) === active.source.display_id)
+      const permission = capture.permission()
+      if (permission === 'restricted') throw new Error('permission-restricted')
+      if (screenId === 'system-picker') {
+        if (!capture.canUseSystemPicker || !active.screenError || active.screenError === 'permission-restricted' ||
+            allowControl !== false) throw new Error('source-unavailable')
+        active.captureMode = 'system-picker'
+      } else {
+        if (permission === 'denied') throw new Error('permission-denied')
+        if (!active.choices) throw new Error(active.screenError || 'source-unavailable')
+        const { source, display } = active.choices.select(screenId, screen.getAllDisplays(), displayRevision)
+        active.source = source
+        active.display = display
+        active.captureMode = 'screen'
+      }
       if (allowControl === true && inputSupported) {
         if (active.display) {
           active.input = new InputBridge()
@@ -297,13 +324,20 @@ function registerHandlers() {
         active.input = null
         active.allowControl = false
         active.controlError = null
+        active.source = null
+        active.display = null
+        active.captureMode = null
+        if (['source-unavailable', ...Object.values(permissionErrors)].includes(err.message)) {
+          active.screenError = err.message
+          active.choices = null
+        }
         active.phase = 'pending'
       }
       throw err
     }
   })
-  handle('reject', () => {
-    const active = requirePending()
+  handle('reject', requestId => {
+    const active = requirePending(requestId)
     active.network.respond(false)
     if (current === active) finish('已拒绝请求')
   })
@@ -323,20 +357,60 @@ function registerHandlers() {
   })
 }
 
+function approvedHost() {
+  return current?.role === 'host' && current.phase === 'connected' && current.token === account.approvedToken
+}
+
+function grantSelectedDisplay(request, callback) {
+  if (trusted(request.frame) && request.videoRequested && !request.audioRequested &&
+      approvedHost() && current.captureMode === 'screen' && current.source) {
+    current.captureGranted = true
+    callback({ video: current.source })
+  } else callback(null)
+}
+
+function disarmSystemPicker(id) {
+  if (!pickerGrant || pickerGrant.id !== id) return false
+  clearTimeout(pickerGrant.timer)
+  pickerGrant = null
+  session.defaultSession.setDisplayMediaRequestHandler(grantSelectedDisplay)
+  return true
+}
+
+function armSystemPicker(requestId) {
+  if (!approvedHost() || current.requestId !== requestId || current.captureMode !== 'system-picker' ||
+      !capture.canUseSystemPicker || current.allowControl || pickerGrant) throw new Error('连接请求已失效。')
+  if (capture.permission() === 'restricted') throw new Error('permission-restricted')
+  const id = randomUUID()
+  // Electron's native picker bypasses the custom source callback. Keep the
+  // separate permission request handler active and consume one video request.
+  session.defaultSession.setDisplayMediaRequestHandler(grantSelectedDisplay, { useSystemPicker: true })
+  const timer = setTimeout(() => {
+    if (pickerGrant?.id === id) finish('等待画面超时。请核实录屏权限和两端的网络设置。', true)
+  }, 90_000)
+  timer.unref()
+  pickerGrant = { id, requestId, used: false, timer }
+  return id
+}
+
 function configurePermissions() {
   const ses = session.defaultSession
-  const sharing = () => current?.role === 'host' && current.token === account.approvedToken && current.phase === 'connected' && Boolean(current.source)
-  ses.setPermissionCheckHandler((contents, permission, origin) =>
-    contents === window?.webContents && permission === 'display-capture' && sharing())
-  ses.setPermissionRequestHandler((contents, permission, callback, details) =>
-    callback(contents === window?.webContents && permission === 'display-capture' &&
-      details.isMainFrame !== false && sharing()))
-  ses.setDisplayMediaRequestHandler((request, callback) => {
-    if (trusted(request.frame) && request.videoRequested && !request.audioRequested && sharing()) {
-      current.captureGranted = true
-      callback({ video: current.source })
-    } else callback(null)
+  function allowed(contents, permission, details) {
+    if (contents !== window?.webContents || !trusted(contents?.mainFrame) || permission !== 'display-capture' ||
+        !details.isMainFrame || details.requestingUrl !== pageUrl || !approvedHost()) return false
+    return current.captureMode === 'screen' ? Boolean(current.source) :
+      current.captureMode === 'system-picker' && pickerGrant?.requestId === current.requestId
+  }
+  ses.setPermissionCheckHandler((contents, permission, _origin, details) => allowed(contents, permission, details))
+  ses.setPermissionRequestHandler((contents, permission, callback, details) => {
+    if (!allowed(contents, permission, details) || details.mediaTypes?.includes('audio')) return callback(false)
+    if (current.captureMode === 'system-picker') {
+      if (pickerGrant.used) return callback(false)
+      pickerGrant.used = true
+    }
+    callback(true)
   })
+  ses.setDisplayMediaRequestHandler(grantSelectedDisplay)
 }
 
 function openWindow() {
@@ -407,9 +481,12 @@ if (primaryInstance) app.whenReady().then(async () => {
   for (const event of ['suspend', 'lock-screen']) {
     powerMonitor.on(event, () => finish('设备已锁定或休眠'))
   }
-  for (const event of ['display-removed', 'display-metrics-changed']) {
-    screen.on(event, (_event, display) => {
-      if (current?.display?.id === display.id) finish('共享显示器配置已更改，请重新配对')
+  for (const event of ['display-removed', 'display-added', 'display-metrics-changed']) {
+    screen.on(event, (_event, display, changedMetrics) => {
+      if (event !== 'display-metrics-changed' || changedMetrics?.some(key => key !== 'workArea')) displayRevision++
+      if (current?.display?.id === display.id || (current?.captureMode === 'screen' && !current.display && event !== 'display-metrics-changed')) {
+        finish('共享显示器配置已更改，请重新配对')
+      }
     })
   }
   openWindow()

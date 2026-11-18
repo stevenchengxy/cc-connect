@@ -122,7 +122,7 @@
       <div class="session-actions"><button class="icon-button" id="fullscreen" type="button" aria-label="切换全屏" data-i18n-aria-label="切换全屏" title="切换全屏" data-i18n-title="切换全屏" hidden><svg><use href="#i-expand"/></svg></button><button id="end-session" class="danger" type="button"><svg><use href="#i-stop"/></svg><span data-i18n="结束连接">结束连接</span></button></div>
     </div>
     <div id="viewer-stage" hidden><video id="remote-video" autoplay playsinline muted tabindex="0" aria-label="远程屏幕" data-i18n-aria-label="远程屏幕"></video><p id="video-wait" data-i18n="正在接收远程画面…">正在接收远程画面…</p></div>
-    <div id="host-stage" class="card" hidden><span class="sharing-icon"><svg><use href="#i-share"/></svg></span><h2 id="sharing-title">正在建立屏幕共享</h2><button class="primary" type="button" id="resume-capture" hidden data-i18n="开始共享">开始共享</button></div>
+    <div id="host-stage" class="card" hidden><span class="sharing-icon"><svg><use href="#i-share"/></svg></span><h2 id="sharing-title">正在建立屏幕共享</h2><button class="primary" type="button" id="resume-capture" hidden data-i18n="开始共享">开始共享</button><button class="text-button" type="button" id="session-screen-settings" hidden data-i18n="打开录屏设置">打开录屏设置</button></div>
     <div class="session-footer"><span class="permission-state" id="permission-state"></span><div class="transport-info"><svg><use href="#i-lock"/></svg><span id="session-stats">正在协商加密连接…</span></div><label id="live-quality-wrap" hidden><span data-i18n="接收画质">接收画质</span> <select id="live-quality" aria-label="接收画质" data-i18n-aria-label="接收画质"><option value="smooth" data-i18n="流畅">流畅</option><option value="balanced" selected data-i18n="均衡">均衡</option><option value="detail" data-i18n="清晰">清晰</option></select></label></div>
     <p class="notice" id="session-notice" role="status" hidden></p>
   </main>
@@ -135,7 +135,11 @@
       <label class="checkbox-row"><input type="checkbox" id="allow-control"><span data-i18n="允许对方使用键盘和鼠标">允许对方使用键盘和鼠标</span></label>
       <p id="control-note" class="micro"></p>
       <p class="notice" id="consent-notice" role="status" hidden></p>
-      <div class="dialog-actions"><button type="button" id="reject" class="secondary" data-i18n="拒绝">拒绝</button><button type="submit" id="accept" class="primary" data-i18n="开始共享">开始共享</button></div>
+      <div class="screen-recovery" id="screen-recovery" hidden>
+        <button type="button" id="retry-screens" class="text-action" data-i18n="重新读取">重新读取</button>
+        <button type="button" id="consent-screen-settings" class="text-button" data-i18n="打开录屏设置" hidden>打开录屏设置</button>
+      </div>
+      <div class="dialog-actions"><button type="button" id="reject" class="secondary" data-i18n="拒绝">拒绝</button><button type="submit" id="accept" class="primary" data-i18n="开始共享">开始共享</button><button type="button" id="use-system-picker" class="primary" data-i18n="选择画面 · 仅观看" hidden>选择画面 · 仅观看</button></div>
     </form>
   </dialog>
 
@@ -145,7 +149,10 @@
       <div class="settings-row"><span data-i18n="语言">语言</span><select id="language-select" aria-label="语言" data-i18n-aria-label="语言" title="语言" data-i18n-title="语言"><option value="zh-CN">简体中文</option><option value="zh-TW">繁體中文</option><option value="en">English</option></select></div>
       <button type="button" id="update-button" class="settings-row"><span data-i18n="软件更新">软件更新</span><span class="row-end"><span id="settings-version"></span><svg aria-hidden="true"><use href="#i-arrow"/></svg></span></button>
       <div class="settings-row account-row"><span><span data-i18n="当前账号">当前账号</span><strong id="settings-identity"></strong></span><button type="button" id="account-logout" class="text-action" data-i18n="退出账号" hidden>退出账号</button></div>
+      <div class="settings-row"><span data-i18n="屏幕共享">屏幕共享</span><button type="button" id="screen-check" class="text-action" aria-controls="screen-check-result" data-i18n="检测屏幕">检测屏幕</button></div>
     </div>
+    <p id="screen-check-result" class="notice" role="status" hidden></p>
+    <button type="button" id="settings-screen-settings" class="text-button" data-i18n="打开录屏设置" hidden>打开录屏设置</button>
     <button type="button" id="settings-end" class="danger" data-i18n="结束连接" hidden>结束连接</button>
     <details id="advanced-settings" hidden><summary data-i18n="自定义中继">自定义中继</summary>
     <form id="settings-form">

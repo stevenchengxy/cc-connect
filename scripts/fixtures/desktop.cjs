@@ -33,7 +33,16 @@ app.whenReady().then(async () => {
   }
   const setHandler = ses.setDisplayMediaRequestHandler.bind(ses)
   let source
-  ses.setDisplayMediaRequestHandler = handler => setHandler((request, reply) => {
+  // The native picker is simulated separately from the application's custom
+  // source handler. Neither fixture path can capture the actual desktop.
+  const captureQA = ses.captureQA = { screenPermission:'granted', listCalls:0, listFails:false, noDisplays:false,
+    pickerCalls:0, cancelPicker:false }
+  ses.setDisplayMediaRequestHandler = (handler, options) => setHandler((request, reply) => {
+    if (options?.useSystemPicker) {
+      captureQA.pickerCalls++
+      return reply(!captureQA.cancelPicker && source ? {video:source.webContents.mainFrame} : null)
+    }
+    if (!handler) return reply(null)
     handler(request, grant => {
       if (!grant?.video || !source) return reply(null)
       reply({ video: source.webContents.mainFrame })
@@ -42,8 +51,13 @@ app.whenReady().then(async () => {
   const syntheticDisplay = {...screen.getPrimaryDisplay(), id:900001, label:'Synthetic QA screen'}
   screen.getPrimaryDisplay = () => syntheticDisplay
   screen.getAllDisplays = () => [syntheticDisplay]
-  desktopCapturer.getSources = async () => [{ name: '测试屏幕', id: 'screen:synthetic', display_id: String(screen.getPrimaryDisplay().id) }]
-  systemPreferences.getMediaAccessStatus = () => 'granted'
+  desktopCapturer.getSources = async () => {
+    captureQA.listCalls++
+    if (captureQA.listFails) throw Error('Failed to get sources')
+    if (captureQA.noDisplays) return []
+    return [{ name: '测试屏幕', id: 'screen:synthetic', display_id: String(screen.getPrimaryDisplay().id) }]
+  }
+  systemPreferences.getMediaAccessStatus = kind => kind === 'screen' ? captureQA.screenPermission : 'granted'
   if (process.argv.includes('--synthetic-source')) {
     source = new BrowserWindow({ width: 700, height: 380, title: 'CC Connect测试画面', webPreferences: { backgroundThrottling: false } })
     await source.loadFile(path.join(__dirname, 'source.html'))

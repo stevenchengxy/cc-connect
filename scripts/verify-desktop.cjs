@@ -134,6 +134,24 @@ async function run() {
     if (!wan) fixture=await require('./fixtures/account-service.cjs').startAccountFixture(relay)
     const host = await launch('host')
     const viewer = await launch('viewer')
+    const localCaptureQA = !!fixture && !relay
+    const setCaptureQA = update => apps[0].evaluate(({session}, update) => {
+      Object.assign(session.defaultSession.captureQA, update)
+    }, update)
+    const readCaptureQA = () => apps[0].evaluate(({session}) => ({...session.defaultSession.captureQA}))
+    const pickerSupported = await apps[0].evaluate(() => process.platform === 'darwin' && Number.parseInt(process.getSystemVersion()) >= 15)
+    async function waitForVideo() {
+      await viewer.waitForFunction(() => {
+        const video = document.getElementById('remote-video')
+        return video.videoWidth > 0 && video.getVideoPlaybackQuality().totalVideoFrames >= 3
+      }, null, {timeout:wan ? 60000 : 20000})
+    }
+    async function waitForNotice(id, text) {
+      await host.waitForFunction(({id,text}) => {
+        const notice = document.getElementById(id)
+        return !notice.hidden && notice.textContent.includes(text)
+      }, {id,text})
+    }
     if (wan) await Promise.all([observeInternetConnection(host), observeInternetConnection(viewer)])
     if (relay) for (const page of [host,viewer]) {
       await page.evaluate(() => {
@@ -166,14 +184,33 @@ async function run() {
     await viewer.locator('#quality-select-button').press('Enter')
     assert.equal(await viewer.locator('#quality-select').inputValue(), 'smooth')
     await viewer.locator('#quality-select').selectOption('balanced')
-    const denied = await host.evaluate(async () => {
+    const captureIsDenied = () => host.evaluate(async () => {
       try {
         const stream = await navigator.mediaDevices.getDisplayMedia({ video: true })
         stream.getTracks().forEach(t => t.stop())
         return false
       } catch { return true }
     })
-    assert.equal(denied, true, 'before consent the app must deny screen capture')
+    assert.equal(await captureIsDenied(), true, 'before consent the app must deny screen capture')
+    if (localCaptureQA) {
+      const before = await readCaptureQA()
+      const failures = await host.evaluate(async () => {
+        const api = window.jianping
+        const calls = await Promise.allSettled([api.screens('stale'), api.armSystemPicker('stale'),
+          api.accept(false,'system-picker','stale')])
+        return calls.map(call => call.status)
+      })
+      assert.deepEqual(failures,['rejected','rejected','rejected'])
+      assert.equal((await readCaptureQA()).listCalls, before.listCalls)
+      assert.equal((await readCaptureQA()).pickerCalls, 0)
+      await setCaptureQA({listFails:true})
+      await host.locator('#settings-button').click()
+      await host.locator('#screen-check').click()
+      await waitForNotice('screen-check-result','无法列出屏幕')
+      if (process.platform === 'darwin') assert.match(await host.locator('#screen-check-result').innerText(), /权限已开启/)
+      await host.locator('#close-settings').click()
+      await setCaptureQA({listFails:false})
+    }
     await host.locator('#host-tab').click()
     async function pair() {
       await host.locator('#host-button').click()
@@ -188,15 +225,67 @@ async function run() {
     await pair()
     await host.locator('#reject').click()
     await viewer.waitForFunction(() => document.getElementById('top-status').textContent === '待连接')
+    if (localCaptureQA && pickerSupported) {
+      await setCaptureQA({listFails:true,cancelPicker:true})
+      await pair()
+      await waitForNotice('consent-notice','无法列出屏幕')
+      assert(await host.locator('#allow-control').isDisabled())
+      await host.locator('#use-system-picker').click()
+      const resume = host.locator('#resume-capture')
+      await resume.waitFor()
+      assert.equal((await readCaptureQA()).pickerCalls, 0, 'Only a local share action may open the picker')
+      assert(await captureIsDenied(), 'Approving a picker session alone must not grant capture')
+      await resume.click()
+      await host.locator('#session-notice').waitFor({state:'visible'})
+      await resume.waitFor()
+      assert.equal((await readCaptureQA()).pickerCalls, 1)
+      assert.equal(await viewer.locator('#remote-video').evaluate(video => video.srcObject), null)
+      assert(await captureIsDenied(), 'Cancelling the picker must withdraw the capture grant')
+      await setCaptureQA({cancelPicker:false})
+      await resume.click()
+      await waitForVideo()
+      assert.equal((await readCaptureQA()).pickerCalls, 2)
+      assert.match(await host.locator('#permission-state').innerText(), /仅观看/)
+      assert.match(await viewer.locator('#permission-state').innerText(), /仅观看/)
+      await host.locator('#end-session').click()
+      await viewer.waitForFunction(() => document.getElementById('top-status').textContent === '待连接')
+      console.log('Verified consent-bound synthetic picker, cancellation, retry, decoded frames and view-only mode.')
+    }
+    const beforePair = await readCaptureQA()
+    if (localCaptureQA) await setCaptureQA({screenPermission:process.platform === 'darwin' ? 'denied' : 'granted',listFails:true})
     await pair()
+    if (localCaptureQA) {
+      if (process.platform === 'darwin') {
+        await waitForNotice('consent-notice','录屏设置')
+        assert(await host.locator('#consent-screen-settings').isVisible())
+        assert.equal((await readCaptureQA()).listCalls, beforePair.listCalls,
+          'An incoming request with denied permission must not prompt for screen access')
+        await setCaptureQA({screenPermission:'restricted'})
+        await host.locator('#retry-screens').click()
+        await waitForNotice('consent-notice','系统策略')
+        assert.equal(await host.locator('#use-system-picker').isVisible(),false)
+        await setCaptureQA({screenPermission:'not-determined'})
+        await host.locator('#retry-screens').click()
+        await waitForNotice('consent-notice','尚未确认')
+        await setCaptureQA({screenPermission:'granted'})
+        await host.locator('#retry-screens').click()
+      }
+      await waitForNotice('consent-notice','无法列出屏幕')
+      assert(await host.locator('#accept').isDisabled())
+      assert.equal(await host.locator('#consent-screen-settings').isVisible(),false)
+      await setCaptureQA({listFails:false,noDisplays:true})
+      await host.locator('#retry-screens').click()
+      await waitForNotice('consent-notice','没有找到')
+      await setCaptureQA({noDisplays:false})
+      await host.locator('#retry-screens').click()
+    }
+    await host.waitForFunction(() => document.getElementById('screens').value && !document.getElementById('accept').disabled)
+    const afterReading = await readCaptureQA()
     await host.locator('#accept').click()
     const help = host.locator('#resume-capture')
     if (await help.isVisible()) await help.click()
     try {
-      await viewer.waitForFunction(() => {
-        const video = document.getElementById('remote-video')
-        return video.videoWidth > 0 && video.getVideoPlaybackQuality().totalVideoFrames >= 3
-      }, null, { timeout: wan ? 60000 : 20000 })
+      await waitForVideo()
     } catch (error) {
       const summary = async page => {
         const state = await page.evaluate(async () => {
@@ -206,10 +295,13 @@ async function run() {
           return {state:pc.connectionState,ice:pc.iceGatheringState,signal:pc.signalingState,
             offers:[pc.localDescription?.type,pc.remoteDescription?.type],iceServers:pc.getConfiguration().iceServers.length,errors:pc.relayErrors,stats:report.filter(s=>s.type.endsWith('candidate')||s.type==='candidate-pair').map(s=>[s.type,s.candidateType,s.state,s.protocol,s.relayProtocol])}
         })
-        return JSON.stringify(state) + '\n' + await page.locator('body').innerText()
+        const notice = page.locator('#session-notice')
+        return JSON.stringify(state) + '\n' + (await notice.isVisible() ? await notice.textContent() : '')
       }
       throw new Error('视频未就绪。\n' + await summary(host) + '\n' + await summary(viewer), { cause: error })
     }
+    assert.equal((await readCaptureQA()).listCalls, afterReading.listCalls,
+      'Sharing must use the source read by the host for this consent request')
     const result = await viewer.evaluate(() => {
       const video = document.getElementById('remote-video')
       return { width: video.videoWidth, height: video.videoHeight, frames: video.getVideoPlaybackQuality().totalVideoFrames }
@@ -243,7 +335,15 @@ async function run() {
       console.log('Verified loopback TURN renewal, ICE restart, one capture permission, and shutdown after relay budget refusal.',relay.grants)
     } else if (fixture) {
       await fixture.setStatus('qa.host','suspended')
-      await host.locator('#account-form').waitFor({state:'visible'})
+      try { await host.locator('#account-form').waitFor({state:'visible'}) }
+      catch (error) {
+        const status = await host.evaluate(async () => ({
+          account:(await window.jianping.info()).account.status,
+          connection:document.getElementById('top-status').innerText,
+          reason:document.getElementById('home-notice').innerText
+        }))
+        throw new Error('Suspended host not signed out: ' + JSON.stringify(status),{cause:error})
+      }
     } else await host.locator('#end-session').click()
     await viewer.waitForFunction(() => !document.getElementById('home').hidden)
     assert.equal(await viewer.locator('#remote-video').evaluate(v => v.srcObject), null)
