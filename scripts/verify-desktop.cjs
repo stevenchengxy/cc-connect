@@ -10,6 +10,7 @@ const { randomBytes } = require('node:crypto')
 const publicIceOnly = process.argv.includes('--public-ice-only')
 const wan = publicIceOnly || process.argv.includes('--wan')
 const loopbackRelay = process.argv.includes('--loopback-relay')
+const legacyPicker = process.argv.includes('--legacy-picker')
 
 async function observeInternetConnection(page) {
   await page.evaluate(restrictCandidates => {
@@ -98,6 +99,7 @@ async function run() {
   let relay, fixture
   async function launch(name) {
     const args = [path.join(__dirname, 'fixtures', 'desktop.cjs'), '--user-data-dir=' + path.join(temp, name)]
+    if (legacyPicker) args.push('--legacy-picker')
     if (name === 'host') args.push('--synthetic-source')
     const instance = await _electron.launch({ executablePath: require('electron'), args, env:{...process.env, CC_QA_ACCOUNT_ORIGIN:fixture?.origin || ''} })
     apps.push(instance)
@@ -179,6 +181,7 @@ async function run() {
     }, update)
     const readCaptureQA = () => apps[0].evaluate(({session}) => ({...session.defaultSession.captureQA}))
     const pickerSupported = await apps[0].evaluate(() => process.platform === 'darwin' && Number.parseInt(process.getSystemVersion()) >= 15)
+    const nativePicker = localCaptureQA && await host.evaluate(async () => (await window.jianping.info()).canUseNativeScreenPicker)
     async function waitForVideo() {
       await viewer.waitForFunction(() => {
         const video = document.getElementById('remote-video')
@@ -250,6 +253,41 @@ async function run() {
       await host.locator('#close-settings').click()
       await setCaptureQA({listFails:false})
     }
+    if (nativePicker) {
+      await host.evaluate(() => {
+        const RTC = window.RTCPeerConnection
+        window.qaRoomConnections = 0
+        window.qaNativeFrameEvents = 0
+        window.RTCPeerConnection = class extends RTC {
+          constructor(config) { super(config); window.qaRoomConnections++ }
+        }
+        window.jianping.onEvent(event => { if (event.type === 'native-frame') window.qaNativeFrameEvents++ })
+      })
+      await setCaptureQA({screenPermission:'denied',listFails:true,inputPermission:'granted',cancelNativePicker:true})
+      const before = await readCaptureQA()
+      await host.locator('#settings-button').click()
+      await host.locator('#screen-check').click()
+      await waitForNotice('screen-check-result','预检未确认')
+      assert.match(await host.locator('#input-check-result').innerText(),/已获辅助功能授权/)
+      const choose = host.locator('#settings-native-display')
+      await choose.click()
+      await waitForNotice('screen-check-result','已取消选择屏幕')
+      assert.equal((await readCaptureQA()).nativeActive,0)
+      await setCaptureQA({cancelNativePicker:false})
+      await choose.click()
+      await waitForNotice('screen-check-result','640 × 360')
+      const after = await readCaptureQA()
+      assert.equal(after.nativeStarts,before.nativeStarts + 2)
+      assert.equal(after.nativeStops,before.nativeStops + 2)
+      assert.equal(after.nativeActive,0)
+      assert.equal(after.nativeFrames,before.nativeFrames + 1)
+      assert.equal(after.roomRequests,before.roomRequests)
+      assert.equal(after.inputStarts,before.inputStarts)
+      assert.deepEqual(await host.evaluate(() => [window.qaRoomConnections,window.qaNativeFrameEvents]),[0,0])
+      await host.locator('#close-settings').click()
+      await setCaptureQA({screenPermission:'granted',listFails:false})
+      console.log('Verified inconclusive preflight with Accessibility granted, diagnostic cancel and retry, one local JPEG, no room, renderer pixels or remote input.')
+    }
     await host.locator('#host-tab').click()
     async function readCopiedCode(predicate) {
       for (let attempt = 0; attempt < 50; attempt++) {
@@ -302,7 +340,7 @@ async function run() {
       await setCaptureQA({screenPermission:'granted',listFails:false})
       console.log('Verified approved members can transfer files in a data-only call while screen capture is restricted.')
     }
-    if (localCaptureQA && pickerSupported) {
+    if (localCaptureQA && pickerSupported && !nativePicker) {
       await setCaptureQA({listFails:true,cancelPicker:true})
       await pair()
       await waitForNotice('consent-notice','无法列出屏幕')
@@ -361,6 +399,69 @@ async function run() {
       await viewer.waitForFunction(() => document.getElementById('top-status').textContent === '待连接')
       console.log('Verified approved member control with stale screen preflight, explicit control consent, Accessibility retry, live video, keyboard and mouse delivery to the isolated host input bridge.')
     }
+    if (nativePicker) {
+      const initial = await readCaptureQA()
+      await setCaptureQA({screenPermission:'denied',listFails:true,inputPermission:'granted',cancelNativePicker:true,inputEvents:[]})
+      await pair()
+      await host.locator('#retry-screens').click()
+      await waitForNotice('consent-notice','预检未确认')
+      await host.locator('#allow-control').check()
+      await host.locator('#use-system-picker').click()
+      const resume = host.locator('#resume-capture')
+      await resume.waitFor()
+      assert.equal((await readCaptureQA()).nativeStarts,initial.nativeStarts)
+      assert(await captureIsDenied(), 'Approving a native picker must not grant general display capture')
+      await resume.click()
+      await waitForNotice('session-notice','已取消选择屏幕')
+      assert.equal((await readCaptureQA()).inputStarts,initial.inputStarts)
+      assert.equal(await viewer.locator('#remote-video').evaluate(v => v.srcObject),null)
+      await setCaptureQA({cancelNativePicker:false})
+      await resume.click()
+      await waitForVideo()
+      await viewer.waitForFunction(() => document.querySelector('#permission-state').textContent.includes('可控制'))
+      const frame = await viewer.locator('#remote-video').evaluate(video => {
+        const canvas = document.createElement('canvas')
+        canvas.width = canvas.height = 1
+        const context = canvas.getContext('2d')
+        context.drawImage(video,0,0,1,1)
+        return [video.videoWidth,video.videoHeight,...context.getImageData(0,0,1,1).data]
+      })
+      assert.deepEqual(frame.slice(0,2),[640,360])
+      assert(frame[2] > 160 && frame[3] < 75 && frame[4] < 75,'The viewer should decode the synthetic red JPEG')
+      await host.evaluate(() => window.jianping.input('stale-room',{kind:'key',code:'KeyB',down:true}))
+      await viewer.locator('#remote-video').click()
+      await viewer.keyboard.press('KeyJ')
+      await apps[0].evaluate(async ({session}) => {
+        const state = session.defaultSession.captureQA
+        for (let i=0; i<60; i++) {
+          if (state.inputEvents.some(e => e.kind === 'button' && e.down) &&
+              state.inputEvents.some(e => e.kind === 'key' && e.code === 'KeyJ' && !e.down)) return
+          await new Promise(resolve => setTimeout(resolve,50))
+        }
+        throw Error('Synthetic remote input did not reach the selected display')
+      })
+      const controlled = await readCaptureQA()
+      assert.equal(controlled.inputStarts,initial.inputStarts + 1)
+      assert(!controlled.inputEvents.some(e => e.code === 'KeyB'), 'An earlier session cannot authorize input')
+      await apps[0].evaluate(({session}) => session.defaultSession.stopSyntheticPicker())
+      await viewer.waitForFunction(() => document.getElementById('top-status').textContent === '待连接')
+      assert.equal(await viewer.locator('#remote-video').evaluate(v => v.srcObject),null)
+      const beforeUnmatched = await readCaptureQA()
+      await setCaptureQA({nativeDisplayId:900002})
+      await pair()
+      await host.locator('#allow-control').check()
+      await host.locator('#use-system-picker').click()
+      await resume.click()
+      await waitForVideo()
+      await waitForNotice('session-notice','仅共享画面')
+      assert.match(await viewer.locator('#permission-state').innerText(),/仅观看/)
+      assert.equal((await readCaptureQA()).inputStarts,beforeUnmatched.inputStarts)
+      await host.locator('#end-session').click()
+      await viewer.waitForFunction(() => document.getElementById('top-status').textContent === '待连接')
+      assert.equal((await readCaptureQA()).nativeActive,0)
+      await setCaptureQA({nativeDisplayId:900001})
+      console.log('Verified native selection after failed enumeration, cancelled selection then retry, decoded 640×360 JPEGs, input after fresh frames, source shutdown and unmatched display view-only.')
+    }
     const beforeRetry = await readCaptureQA()
     if (localCaptureQA) await setCaptureQA({screenPermission:process.platform === 'darwin' ? 'denied' : 'granted',listFails:true})
     await pair()
@@ -376,7 +477,7 @@ async function run() {
         assert.equal(await host.locator('#use-system-picker').isVisible(),false)
         await setCaptureQA({screenPermission:'not-determined'})
         await host.locator('#retry-screens').click()
-        await waitForNotice('consent-notice','尚未确认')
+        await waitForNotice('consent-notice','预检未确认')
         await setCaptureQA({screenPermission:'granted'})
         await host.locator('#retry-screens').click()
       }

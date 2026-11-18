@@ -18,7 +18,7 @@ test('explicit diagnostics enumerate screens without thumbnails and expose only 
 })
 
 test('unconfirmed permission does not open a broad OS prompt when an incoming request arrives', async () => {
-  for (const [permission, errorCode] of [['denied', 'permission-denied'], ['not-determined', 'permission-pending']]) {
+  for (const [permission, errorCode] of [['denied', 'preflight-denied'], ['not-determined', 'permission-pending']]) {
     let current = permission
     let calls = 0
     const capture = new ScreenCapture({ platform: 'darwin', systemVersion: '14.7',
@@ -64,7 +64,19 @@ test('explicit successful system enumeration is kept when preflight is stale, wi
   assert.equal(screenSelectionError('denied', checked.report.permission), null)
   assert.equal(screenSelectionError('denied', 'granted'), 'permission-denied')
   assert.equal(screenSelectionError('restricted', checked.report.permission), 'permission-restricted')
-  assert.equal((await capture.inspect(false)).report.errorCode, 'permission-denied')
+  assert.equal((await capture.inspect(false)).report.errorCode, 'preflight-denied')
+})
+
+test('a persistent macOS preflight and a failed listing cannot identify a fresh user denial', async () => {
+  for (const permission of ['denied', 'not-determined']) {
+    for (const getSources of [async () => [], async () => { throw new Error('Failed to get sources') }]) {
+      const capture = new ScreenCapture({platform:'darwin', systemVersion:'26.2',
+        getPermission:() => permission, getSources})
+      assert.deepEqual((await capture.inspect(true)).report, {
+        permission, screenCount:0, errorCode:'preflight-unconfirmed', canUseSystemPicker:true
+      })
+    }
+  }
 })
 
 test('a new denial during enumeration or a Windows denial invalidates returned sources', async () => {

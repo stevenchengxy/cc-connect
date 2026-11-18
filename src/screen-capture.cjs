@@ -30,7 +30,7 @@ class ScreenCapture {
     let sources = []
     let errorCode = null
     if (permission === 'restricted' || (permissionErrors[permission] && !explicitCheck)) {
-      errorCode = permissionErrors[permission]
+      errorCode = this.isMac && permission === 'denied' ? 'preflight-denied' : permissionErrors[permission]
     } else {
       try {
         sources = await this.getSources({ types: ['screen'], thumbnailSize: { width: 0, height: 0 } })
@@ -48,7 +48,9 @@ class ScreenCapture {
         && initialPermission === 'denied' && permission === 'denied'
       if (permissionErrors[permission] && !confirmedMacSources) {
         sources = []
-        errorCode = permissionErrors[permission]
+        const unconfirmed = this.isMac && explicitCheck && permission === initialPermission &&
+          (permission === 'denied' || permission === 'not-determined')
+        errorCode = unconfirmed ? 'preflight-unconfirmed' : permissionErrors[permission]
       }
     }
     const report = { permission, screenCount: sources.length, errorCode,

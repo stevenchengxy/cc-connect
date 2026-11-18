@@ -10,6 +10,7 @@
   <script defer src="i18n.js"></script>
   <script defer src="custom-select.js"></script>
   <script defer src="file-channel.js"></script>
+  <script defer src="native-display-video.js"></script>
   <script defer src="app.js"></script>
 </head>
 <body>
@@ -168,6 +169,7 @@
       <div class="settings-row"><span data-i18n="屏幕共享">屏幕共享</span><button type="button" id="screen-check" class="text-action" aria-controls="screen-check-result" data-i18n="检测屏幕">检测屏幕</button></div>
     </div>
     <p id="screen-check-result" class="notice" role="status" hidden></p>
+    <button type="button" id="settings-native-display" class="text-action" data-i18n="用系统选择屏幕" hidden>用系统选择屏幕</button>
     <p id="input-check-result" class="micro" role="status" hidden></p>
     <p id="checked-app-path" class="micro" hidden></p>
     <button type="button" id="settings-screen-settings" class="text-button" data-i18n="打开录屏设置" hidden>打开录屏设置</button>

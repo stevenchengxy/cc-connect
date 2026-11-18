@@ -110,6 +110,7 @@ async function main() {
       console.log('Owned Windows form ready and foreground verified')
     }
     const events = []
+    const requestId = require('node:crypto').randomUUID()
     let consentedControl = false
     let dispatching = Promise.resolve()
     peer.on('event', event => {
@@ -119,9 +120,9 @@ async function main() {
           console.log('Managed pairing completed for', role, mode)
           const iceServers = await peer.getManagedIceServers()
           console.log('Managed TURN entries for', role, mode, iceServers.length)
-          await notify({type:'accepted', role, name:event.name, managedWan:true, managedIceServers:iceServers, managedIceExpiresAt:peer.managedIceExpiresAt, allowControl:host && consentedControl})
+          await notify({type:'accepted', requestId, role, name:event.name, managedWan:true, managedIceServers:iceServers, managedIceExpiresAt:peer.managedIceExpiresAt, allowControl:host && consentedControl})
         } else if (event.type === 'signal') await notify({type:'signal', signal:event.payload})
-        else await notify(event)
+        else await notify(event.type === 'request' ? {...event,requestId} : event)
       }).catch(() => { events.push('signaling delivery stopped') })
     })
     const notify = event => page.evaluate(e => window.qaEvent(e), event)
@@ -154,7 +155,7 @@ async function main() {
       const invite = rawInvite.trim().startsWith('{') ? JSON.parse(rawInvite)[mode] : rawInvite.trim()
       await page.exposeFunction('qaJoin', () => peer.join({invite, name:viewerName}))
     }
-    await page.addInitScript(({host, requireRelay, ownedWindows}) => {
+    await page.addInitScript(({host, requireRelay, ownedWindows, requestId}) => {
       const NativePeer = window.RTCPeerConnection
       window.qaCandidates = {local:new Set(), remote:new Set()}
       window.RTCPeerConnection = class extends NativePeer {
@@ -179,11 +180,12 @@ async function main() {
         signal:window.qaSignal, disconnect:window.qaStop, renewIce:window.qaRenewIce,
         ...(host ? {host:window.qaHost,screens:async () => [{id:'synthetic',name:'Generated canvas',primary:true}],
           accept:async (allow, screen) => { window.qaControlGranted = allow === true; await window.qaAllowCanvas(allow, screen) },
-          screenStreamReady:async () => window.qaControlGranted && window.qaCaptureTrack?.readyState === 'live'}
+          screenStreamReady:async id => id === requestId && window.qaControlGranted && window.qaCaptureTrack?.readyState === 'live'}
           : {join:window.qaJoin})
       }
       window.qaTarget = {step:0, delivered:0, down:false, pressed:false}
-      if (host) window.jianping.input = event => {
+      if (host) window.jianping.input = (id,event) => {
+        if (id !== requestId) return
         // A finite state machine accepts only one central click followed by KeyA.
         // The Windows fixture maps those transitions to its own HWND.
         const target = window.qaTarget
@@ -233,7 +235,7 @@ async function main() {
         window.qaCaptureTrack = stream.getVideoTracks()[0]
         return stream
       }})
-    }, {host, requireRelay, ownedWindows})
+    }, {host, requireRelay, ownedWindows, requestId})
     await page.goto(pathToFileURL(path.resolve(__dirname, '../src/ui/index.html')).href)
     await page.waitForFunction(() => document.getElementById('device-name').textContent === 'Synthetic test')
     if (host) {

@@ -1,9 +1,66 @@
 // A visible test window supplies an animated synthetic source. Always replace
 // the capture target here so the integration test never reads the user's desktop.
-const { app, BrowserWindow, clipboard, desktopCapturer, session, screen, systemPreferences, safeStorage } = require('electron')
+const { app, BrowserWindow, clipboard, desktopCapturer, nativeImage, session, screen, systemPreferences, safeStorage } = require('electron')
 const path = require('node:path')
+const {EventEmitter} = require('node:events')
+const {PassThrough} = require('node:stream')
+
+// Replace only the native child process. Framing, backpressure, local
+// approval, display matching, JPEG decode and WebRTC use production code.
+function installSyntheticPicker(ses,qa) {
+  const bridge = require('../../native/screen-bridge.cjs')
+  const Capture = bridge.NativeScreenCapture
+  bridge.nativeHelperAvailable = () => true // This process uses the in-memory synthetic helper.
+  if (process.argv.includes('--legacy-picker')) bridge.supportsNativePicker = () => false
+  const width = 640, height = 360
+  const images = [205,235].map(red => {
+    const pixels = Buffer.alloc(width * height * 4,Buffer.from([38,32,red,255]))
+    return nativeImage.createFromBitmap(pixels,{width,height,scaleFactor:1}).toJPEG(82)
+  })
+  bridge.NativeScreenCapture = class extends Capture {
+    constructor(options) { super({...options,spawnProcess:open}) }
+  }
+  function open() {
+    const child = new EventEmitter()
+    child.stdin = new PassThrough()
+    child.stdout = new PassThrough()
+    const id = qa.nativeDisplayId
+    qa.nativeStarts++
+    qa.nativeActive++
+    let timer, index = 0, ended = false
+    const end = code => {
+      if (ended) return
+      ended = true
+      clearInterval(timer)
+      qa.nativeActive--
+      qa.nativeStops++
+      child.stdout.end()
+      setImmediate(() => child.emit('exit',code))
+    }
+    child.kill = () => end(0)
+    ses.stopSyntheticPicker = () => end(5)
+    const produce = () => {
+      if (ended || child.stdout.isPaused()) return
+      const jpg = images[index++ % images.length]
+      const header = Buffer.alloc(16)
+      const fields = [id,width,height,jpg.length]
+      fields.forEach((value,i) => header.writeUInt32BE(value,i * 4))
+      qa.nativeFrames++
+      child.stdout.write(Buffer.concat([header,jpg]))
+    }
+    if (qa.cancelNativePicker) setImmediate(() => end(3))
+    else { timer = setInterval(produce,65); setImmediate(produce) }
+    return child
+  }
+}
+
 app.whenReady().then(async () => {
   const ses = session.defaultSession
+  const captureQA = ses.captureQA = {screenPermission:'granted',listCalls:0,listFails:false,noDisplays:false,
+    pickerCalls:0,cancelPicker:false,inputPermission:'granted',inputStarts:0,inputEvents:[],
+    nativeStarts:0,nativeStops:0,nativeActive:0,nativeFrames:0,nativeDisplayId:900001,
+    cancelNativePicker:false,roomRequests:0}
+  installSyntheticPicker(ses,captureQA)
   // Both test windows use an in-memory clipboard; the host OS clipboard is private.
   clipboard.writeText = value => { ses.qaCopiedText = value }
   const fixture = process.env.CC_QA_ACCOUNT_ORIGIN
@@ -13,6 +70,7 @@ app.whenReady().then(async () => {
     const fetch = ses.fetch.bind(ses)
     ses.fetch = (url, init) => {
       const target = new URL(url)
+      if (target.pathname.startsWith('/v1/rooms/')) captureQA.roomRequests++
       if (target.origin === 'https://cc-connect-pair.stevenchengxy19.chatgpt.site') return fetch(origin.origin + target.pathname, init)
       return fetch(url, init)
     }
@@ -37,8 +95,6 @@ app.whenReady().then(async () => {
   let source
   // The native picker is simulated separately from the application's custom
   // source handler. Neither fixture path can capture the actual desktop.
-  const captureQA = ses.captureQA = { screenPermission:'granted', listCalls:0, listFails:false, noDisplays:false,
-    pickerCalls:0, cancelPicker:false, inputPermission:'granted', inputStarts:0, inputEvents:[] }
   if (fixture) {
     // No test input is injected into the operating system. The fixture
     // records the operations that reach the host's real session input gate.

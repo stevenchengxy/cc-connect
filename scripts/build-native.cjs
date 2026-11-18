@@ -15,16 +15,27 @@ function run(cmd, args) {
 
 if (process.platform === 'darwin') {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'jianping-native-'));
-  try {
-    const slices = ['arm64', 'x86_64'].map((arch) => {
-      const binary = path.join(tmp, arch);
-      run('xcrun', ['swiftc', '-O', '-target', arch + '-apple-macos12.0',
-        path.join(sources, 'MacInput.swift'), '-o', binary]);
-      return binary;
+  function universal(source, destination, minimum) {
+    const slices = ['arm64', 'x86_64'].map(arch => {
+      const slice = path.join(tmp, path.basename(source, '.swift') + '-' + arch);
+      run('xcrun', ['swiftc', '-O', '-target', arch + '-apple-macos' + minimum,
+        path.join(sources, source), '-o', slice]);
+      return slice;
     });
+    run('xcrun', ['lipo', '-create', ...slices, '-output', destination]);
+  }
+  try {
     const binary = path.join(output, 'jianping-input');
-    run('xcrun', ['lipo', '-create', ...slices, '-output', binary]);
+    universal('MacInput.swift', binary, '12.0');
     run('/usr/bin/codesign', ['-s', '-', '--force', '--identifier', 'app.jianping.input', binary]);
+    const app = path.join(output, 'CC Connect Screen.app');
+    const contents = path.join(app, 'Contents');
+    fs.mkdirSync(path.join(contents, 'MacOS'), { recursive: true });
+    fs.mkdirSync(path.join(contents, 'Resources'), { recursive: true });
+    fs.copyFileSync(path.join(sources, 'MacScreen-Info.plist'), path.join(contents, 'Info.plist'));
+    fs.copyFileSync(path.join(__dirname, '../build/icon.icns'), path.join(contents, 'Resources', 'icon.icns'));
+    universal('MacScreen.swift', path.join(contents, 'MacOS', 'cc-connect-screen'), '12.3');
+    run('/usr/bin/codesign', ['-s', '-', '--force', app]);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

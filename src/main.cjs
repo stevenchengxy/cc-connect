@@ -8,6 +8,7 @@ const path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { PairingNetwork } = require('./network.cjs')
 const { InputBridge } = require('../native/bridge.cjs')
+const { NativeScreenCapture, supportsNativePicker, nativeHelperAvailable } = require('../native/screen-bridge.cjs')
 const { Settings } = require('./settings.cjs')
 const { DesktopAccount, messages } = require('./account.cjs')
 const { AdminConsole } = require('./admin-console.cjs')
@@ -21,14 +22,19 @@ const pageUrl = pathToFileURL(page).href
 const iconPath = path.join(__dirname, 'icon.png')
 const managedUrl = 'https://cc-connect-pair.stevenchengxy19.chatgpt.site/v1'
 const inputSupported = ['darwin', 'win32'].includes(process.platform)
+const systemVersion = process.platform === 'darwin' ? process.getSystemVersion() : ''
+const nativeOptions = { resourcesPath: process.resourcesPath, isPackaged: app.isPackaged }
+const nativePickerSupported = supportsNativePicker(process.platform, systemVersion)
 const deviceName = os.hostname().replace(/\.local$/i, '').slice(0, 64) || '我的电脑'
 const capture = new ScreenCapture({
-  platform: process.platform, systemVersion: process.platform === 'darwin' ? process.getSystemVersion() : '',
+  platform: process.platform, systemVersion,
   getPermission: kind => systemPreferences.getMediaAccessStatus(kind),
   getSources: options => desktopCapturer.getSources(options)
 })
 let displayRevision = 0
 let pickerGrant
+let diagnosticCapture
+let inputDrained = Promise.resolve()
 
 // Preserve the original application's local settings and permission identity.
 const fs = require('node:fs')
@@ -99,14 +105,19 @@ function trusted(frame) {
 }
 
 function finish(reason = '连接已结束', error = false) {
+  diagnosticCapture?.stop()
   const active = current
   current = null
   if (!active) return
   if (pickerGrant) disarmSystemPicker(pickerGrant.id)
-  void active.files?.cancel()
   active.allowControl = false
-  active.input?.stop()
+  if (active.input) inputDrained = Promise.all([inputDrained, active.input.stop()]).then(() => {})
+  active.nativeCapture?.bridge.stop()
+  void active.files?.cancel()
   active.network.stop()
+  if (active.previousThrottling !== undefined && window && !window.isDestroyed() && !window.webContents.isDestroyed()) {
+    window.webContents.setBackgroundThrottling(active.previousThrottling)
+  }
   tray?.destroy()
   tray = null
   if (window && !window.isDestroyed()) window.setTitle('CC Connect')
@@ -137,6 +148,7 @@ function createSession(role, token) {
   if (!token || account.approvedToken !== token) throw new Error(messages.account_required)
   if (installingUpdate) throw new Error('更新任务正在进行，请稍候。')
   if (current || saveInProgress) throw new Error('请先结束当前配对，或等待网络设置保存完成。')
+  diagnosticCapture?.stop()
   const network = new PairingNetwork({
     managedUrl, accountOnly: true, accountToken: token,
     fetchImpl: (url, init) => session.defaultSession.fetch(url, { ...init, credentials: 'omit' })
@@ -162,7 +174,7 @@ function createSession(role, token) {
         if (event.mode === 'files') active.captureMode = 'files'
         if (role === 'host') showSharingIndicator()
         const accepted = { type: 'accepted', role, name: event.name, allowControl: active.allowControl,
-          requestId: active.requestId, captureMode: active.captureMode || 'screen' }
+          requestId: active.requestId, captureMode: active.captureMode || 'screen', controlRequested: active.controlRequested === true }
         if (event.managedWan) {
           active.pendingSignals = []
           active.network.getManagedIceServers().then(iceServers => {
@@ -261,6 +273,7 @@ function registerHandlers() {
     const config = token ? await preferences.getPublic() : null
     return {name:deviceName, platform:process.platform, version:app.getVersion(), inputSupported, language,
       canUseSystemPicker:capture.canUseSystemPicker,
+      canUseNativeScreenPicker:nativePickerSupported && nativeHelperAvailable(nativeOptions) && capture.permission() !== 'restricted',
       update:updater.getState(), ...(token && token === account.approvedToken ? config : {}), account:account.state}
   })
   handle('account-login', values => account.login(values))
@@ -287,6 +300,17 @@ function registerHandlers() {
   })
   handle('arm-system-picker', armSystemPicker)
   handle('disarm-system-picker', disarmSystemPicker)
+  handle('test-native-display', testNativeDisplay)
+  handle('cancel-native-display-test', () => diagnosticCapture?.stop())
+  handle('pick-native-display', pickNativeDisplay)
+  handle('native-frame-ack', (requestId, captureId) => {
+    const selection = nativeSelection(requestId, captureId)
+    return selection.bridge.requestFrame()
+  })
+  handle('stop-native-display', (requestId, captureId) => {
+    nativeSelection(requestId, captureId)
+    finish('本机已结束共享')
+  })
   handle('renew-ice', async () => {
     const active = current
     if (!active || active.phase !== 'connected' || active.token !== account.approvedToken) throw new Error(messages.account_required)
@@ -358,7 +382,10 @@ function registerHandlers() {
       if (active.requestedFiles) throw new Error('文件会话未获双方确认。')
       const permission = capture.permission()
       if (permission === 'restricted') throw new Error('permission-restricted')
-      if (screenId === 'system-picker') {
+      if (screenId === 'native-display') {
+        requireNativePicker()
+        active.captureMode = 'native-display'
+      } else if (screenId === 'system-picker') {
         if (!capture.canUseSystemPicker || !active.screenError || active.screenError === 'permission-restricted' ||
             allowControl !== false) throw new Error('source-unavailable')
         active.captureMode = 'system-picker'
@@ -372,7 +399,7 @@ function registerHandlers() {
         active.captureMode = 'screen'
       }
       if (allowControl === true) {
-        if (!inputSupported || !active.display) throw new Error('无法为所选显示器启用键鼠控制。')
+        if (!inputSupported || (active.captureMode !== 'native-display' && !active.display)) throw new Error('无法为所选显示器启用键鼠控制。')
         if (process.platform === 'darwin') {
           const access = await InputBridge.macAccess({ resourcesPath: process.resourcesPath, isPackaged: app.isPackaged })
           if (access === 'denied') throw new Error('control-permission')
@@ -406,19 +433,28 @@ function registerHandlers() {
     if (current?.phase !== 'connected' || current.token !== account.approvedToken) throw new Error('连接已结束。')
     current.network.signal(payload)
   })
-  handle('screen-stream-ready', async requestId => {
+  handle('screen-stream-ready', async (requestId, captureId) => {
     const active = current
-    if (!approvedHost() || active.requestId !== requestId || active.captureMode !== 'screen' ||
-        !active.sourceRequested) throw new Error('连接请求已失效。')
-    const error = screenSelectionError(capture.permission(), active.listedPermission)
-    if (error) throw new Error(error)
-    // Consume the normal capture callback once, after the local renderer
-    // obtained a live OS-gated track for the approved source and request.
+    if (!approvedHost() || active.requestId !== requestId || active.captureGranted || !active.sourceRequested) {
+      throw new Error('连接请求已失效。')
+    }
+    const native = active.captureMode === 'native-display'
+    if (native) {
+      nativeSelection(requestId, captureId)
+      requireNativePicker()
+    } else {
+      if (active.captureMode !== 'screen') throw new Error('连接请求已失效。')
+      const error = screenSelectionError(capture.permission(), active.listedPermission)
+      if (error) throw new Error(error)
+    }
+    // Consume the selected-source grant only after the renderer obtained video.
     active.sourceRequested = false
-    if (active.controlRequested) {
+    if (active.controlRequested && (!native || active.display)) {
       if (active.input || !active.display) throw new Error('无法为所选显示器启用键鼠控制。')
       active.input = new InputBridge()
       active.input.on('error', err => disableInput(active, err.message))
+      await inputDrained
+      if (current !== active || !approvedHost()) throw new Error('连接请求已失效。')
       await active.input.start(active.display, { resourcesPath: process.resourcesPath, isPackaged: app.isPackaged })
       if (current !== active || !approvedHost()) { active.input.stop(); throw new Error('连接请求已失效。') }
       if (active.controlError) throw new Error(active.controlError)
@@ -429,9 +465,10 @@ function registerHandlers() {
     active.captureGranted = true
     return active.allowControl
   })
-  ipcMain.on('jianping:input', (event, data) => {
+  ipcMain.on('jianping:input', (event, requestId, data) => {
     if (localFiles.open || !trusted(event.senderFrame) || current?.role !== 'host' ||
-        current.phase !== 'connected' || current.token !== account.approvedToken || !current.allowControl || !current.captureGranted) return
+        current.phase !== 'connected' || current.requestId !== requestId || current.token !== account.approvedToken ||
+        !current.allowControl || !current.captureGranted) return
     try { current.input.send(data) } catch (err) { disableInput(current, err.message) }
   })
   handle('disconnect', () => finish('本机已断开连接'))
@@ -443,6 +480,79 @@ function registerHandlers() {
 
 function approvedHost() {
   return current?.role === 'host' && current.phase === 'connected' && current.token === account.approvedToken
+}
+
+function requireNativePicker() {
+  if (!nativePickerSupported || !nativeHelperAvailable(nativeOptions)) throw new Error('native-picker-unsupported')
+  if (capture.permission() === 'restricted') throw new Error('permission-restricted')
+}
+
+function createNativeCapture() {
+  return new NativeScreenCapture({ ...nativeOptions, isRestricted: () => capture.permission() === 'restricted' })
+}
+
+async function testNativeDisplay() {
+  requireNativePicker()
+  if (current || diagnosticCapture) throw new Error('native-picker-failed')
+  const bridge = diagnosticCapture = createNativeCapture()
+  try {
+    // A previous session may still be releasing held buttons or draining stdin.
+    await inputDrained
+    if (bridge.closed || current) throw new Error('native-picker-cancelled')
+    const { width, height } = await bridge.start()
+    if (bridge.closed || current) throw new Error('native-picker-cancelled')
+    requireNativePicker()
+    return { width, height }
+  } finally {
+    bridge.stop()
+    diagnosticCapture = null
+  }
+}
+
+function nativeSelection(requestId, captureId) {
+  const selection = current?.nativeCapture
+  if (!approvedHost() || current.captureMode !== 'native-display' || current.requestId !== requestId ||
+      !selection?.displayId || selection.id !== captureId || selection.bridge.closed) throw new Error('连接请求已失效。')
+  return selection
+}
+
+async function pickNativeDisplay(requestId) {
+  requireNativePicker()
+  const active = current
+  if (!approvedHost() || active.requestId !== requestId || active.captureMode !== 'native-display' ||
+      active.nativeCapture || active.input || diagnosticCapture) throw new Error('连接请求已失效。')
+  const bridge = createNativeCapture()
+  const selection = active.nativeCapture = { id: randomUUID(), bridge }
+  bridge.on('frame', ({ width, height, bytes }) => {
+    if (current !== active || !approvedHost() || active.nativeCapture !== selection || !trusted(window?.webContents.mainFrame)) return
+    if (!selection.delivered) {
+      selection.delivered = true
+      active.sourceRequested = true
+    }
+    send({ type: 'native-frame', requestId, captureId: selection.id, width, height, bytes })
+  })
+  bridge.on('ended', reason => {
+    if (current === active && active.nativeCapture === selection && selection.displayId) {
+      if (reason === 'permission-restricted') return finish('系统策略限制了录屏，请联系设备管理员。', true)
+      finish(reason === 'native-picker-ended' ? '本机已结束共享' : '画面来源已结束，请重新配对。')
+    }
+  })
+  try {
+    await inputDrained
+    if (bridge.closed || current !== active || !approvedHost()) throw new Error('连接请求已失效。')
+    const { displayId, width, height } = await bridge.start()
+    if (bridge.closed || current !== active || !approvedHost()) throw new Error('连接请求已失效。')
+    requireNativePicker()
+    active.display = screen.getAllDisplays().find(display => display.id === displayId)
+    selection.displayId = displayId
+    active.previousThrottling = window.webContents.getBackgroundThrottling()
+    window.webContents.setBackgroundThrottling(false)
+    return { captureId: selection.id, displayId, width, height, matched: Boolean(active.display) }
+  } catch (error) {
+    if (active.nativeCapture === selection) active.nativeCapture = null
+    bridge.stop()
+    throw error
+  }
 }
 
 function grantSelectedDisplay(request, callback) {
@@ -568,8 +678,11 @@ if (primaryInstance) app.whenReady().then(async () => {
   }
   for (const event of ['display-removed', 'display-added', 'display-metrics-changed']) {
     screen.on(event, (_event, display, changedMetrics) => {
-      if (event !== 'display-metrics-changed' || changedMetrics?.some(key => key !== 'workArea')) displayRevision++
-      if (current?.display?.id === display.id || (current?.captureMode === 'screen' && !current.display && event !== 'display-metrics-changed')) {
+      const geometryChanged = event !== 'display-metrics-changed' || changedMetrics?.some(key => key !== 'workArea')
+      if (geometryChanged) displayRevision++
+      if (current?.captureMode === 'native-display' && !geometryChanged) return
+      if (current?.display?.id === display.id || current?.nativeCapture?.displayId === display.id ||
+          (current?.captureMode === 'screen' && !current.display && event !== 'display-metrics-changed')) {
         finish('共享显示器配置已更改，请重新配对')
       }
     })
