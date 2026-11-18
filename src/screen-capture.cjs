@@ -8,8 +8,9 @@ const permissionErrors = {
 
 class ScreenCapture {
   constructor({ platform, systemVersion, getPermission, getSources }) {
+    this.isMac = platform === 'darwin'
     this.hasPermissionStatus = ['darwin', 'win32'].includes(platform)
-    this.canUseSystemPicker = platform === 'darwin' && Number.parseInt(systemVersion, 10) >= 15
+    this.canUseSystemPicker = this.isMac && Number.parseInt(systemVersion, 10) >= 15
     this.getPermission = getPermission
     this.getSources = getSources
   }
@@ -24,7 +25,8 @@ class ScreenCapture {
   }
 
   async inspect(explicitCheck) {
-    let permission = this.permission()
+    const initialPermission = this.permission()
+    let permission = initialPermission
     let sources = []
     let errorCode = null
     if (permission === 'restricted' || (permissionErrors[permission] && !explicitCheck)) {
@@ -39,7 +41,12 @@ class ScreenCapture {
       // Electron can reject before returning any sources. Read the OS decision
       // again after the request, including when a privacy prompt has just closed.
       permission = this.permission()
-      if (permission === 'denied' || permission === 'restricted' || (errorCode && permission === 'not-determined')) {
+      // On macOS getSources already asks the system for capture access.
+      // Its permission-gated result and the preflight status can disagree.
+      // Keep successful enumeration distinct from a grant to start capture.
+      const confirmedMacSources = this.isMac && explicitCheck && sources.length > 0
+        && initialPermission === 'denied' && permission === 'denied'
+      if (permissionErrors[permission] && !confirmedMacSources) {
         sources = []
         errorCode = permissionErrors[permission]
       }
@@ -48,6 +55,12 @@ class ScreenCapture {
       canUseSystemPicker: this.canUseSystemPicker && permission !== 'restricted' }
     return { sources, report }
   }
+}
+
+function screenSelectionError(permission, listedPermission) {
+  if (permission === 'restricted') return 'permission-restricted'
+  if (permission === 'denied' && listedPermission !== 'denied') return 'permission-denied'
+  return null
 }
 
 class ScreenChoices {
@@ -71,4 +84,4 @@ class ScreenChoices {
   }
 }
 
-module.exports = { ScreenCapture, ScreenChoices, permissionErrors }
+module.exports = { ScreenCapture, ScreenChoices, screenSelectionError, permissionErrors }

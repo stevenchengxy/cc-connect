@@ -60,11 +60,22 @@ class InputBridge extends EventEmitter {
 
   async checkPermission(options) {
     if (!keyMaps[process.platform]) return false;
+    if (process.platform === 'darwin') return await InputBridge.macAccess(options) === 'granted';
     return new Promise(resolve => {
       execFile(binaryPath(options), ['--check'], { timeout: 4000, windowsHide: true }, (err, stdout) => {
         resolve(!err && stdout.trim() === 'ALLOWED');
       });
     });
+  }
+
+  static async macAccess(options, request = false) {
+    return new Promise(resolve => {
+      execFile(binaryPath(options), [request ? '--request-access' : '--check'], { timeout: request ? 30000 : 4000 },
+        (err, stdout) => {
+          const status = stdout?.trim()
+          resolve(!err && status === 'ALLOWED' ? 'granted' : !err && status === 'DENIED' ? 'denied' : 'unknown')
+        })
+    })
   }
 
   async start(display, options) {

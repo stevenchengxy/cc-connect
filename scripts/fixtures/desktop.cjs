@@ -38,7 +38,18 @@ app.whenReady().then(async () => {
   // The native picker is simulated separately from the application's custom
   // source handler. Neither fixture path can capture the actual desktop.
   const captureQA = ses.captureQA = { screenPermission:'granted', listCalls:0, listFails:false, noDisplays:false,
-    pickerCalls:0, cancelPicker:false }
+    pickerCalls:0, cancelPicker:false, inputPermission:'granted', inputStarts:0, inputEvents:[] }
+  if (fixture) {
+    // No test input is injected into the operating system. The fixture
+    // records the operations that reach the host's real session input gate.
+    const {InputBridge} = require('../../native/bridge.cjs')
+    InputBridge.macAccess = async () => captureQA.inputPermission
+    InputBridge.prototype.start = async display => {
+      if (display.id !== 900001 || captureQA.inputPermission !== 'granted') throw Error('control-permission')
+      captureQA.inputStarts++
+    }
+    InputBridge.prototype.send = data => { captureQA.inputEvents.push(data); return true }
+  }
   ses.setDisplayMediaRequestHandler = (handler, options) => setHandler((request, reply) => {
     if (options?.useSystemPicker) {
       captureQA.pickerCalls++

@@ -25,12 +25,16 @@ if arguments == ["--check"] {
     reply(CGPreflightPostEventAccess() ? "ALLOWED" : "DENIED")
     exit(0)
 }
+if arguments == ["--request-access"] {
+    reply(CGPreflightPostEventAccess() || CGRequestPostEventAccess() ? "ALLOWED" : "DENIED")
+    exit(0)
+}
 guard arguments.count == 1, let display = CGDirectDisplayID(arguments[0]),
       isActiveDisplay(display) else {
     fail("所选显示器不可用。")
 }
 guard CGPreflightPostEventAccess() else {
-    fail("请在系统设置的「隐私与安全性 → 辅助功能」中允许CC Connect控制键鼠。")
+    fail("control-permission")
 }
 guard let source = CGEventSource(stateID: .privateState) else {
     fail("无法创建系统输入会话。")

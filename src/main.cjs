@@ -12,8 +12,9 @@ const { Settings } = require('./settings.cjs')
 const { DesktopAccount, messages } = require('./account.cjs')
 const { AdminConsole } = require('./admin-console.cjs')
 const { Updater } = require('./updater.cjs')
+const { FileTransfer, LocalFilePanel } = require('./file-transfer.cjs')
 const { systemUpdateTransport } = require('./update-transport.cjs')
-const { ScreenCapture, ScreenChoices, permissionErrors } = require('./screen-capture.cjs')
+const { ScreenCapture, ScreenChoices, screenSelectionError, permissionErrors } = require('./screen-capture.cjs')
 
 const page = path.join(__dirname, 'ui', 'index.html')
 const pageUrl = pathToFileURL(page).href
@@ -49,6 +50,11 @@ let tray
 let saveInProgress = false
 let updater
 let installingUpdate = false
+const localFiles = new LocalFilePanel(
+  active => current === active && active.phase === 'connected' && active.token === account.approvedToken,
+  (active, input) => input.start(active.display, { resourcesPath: process.resourcesPath, isPackaged: app.isPackaged }),
+  (active, error) => disableInput(active, error.message)
+)
 app.on('second-instance', () => {
   if (window && !window.isDestroyed()) {
     if (window.isMinimized()) window.restore()
@@ -97,6 +103,7 @@ function finish(reason = '连接已结束', error = false) {
   current = null
   if (!active) return
   if (pickerGrant) disarmSystemPicker(pickerGrant.id)
+  void active.files?.cancel()
   active.allowControl = false
   active.input?.stop()
   active.network.stop()
@@ -110,17 +117,19 @@ function finish(reason = '连接已结束', error = false) {
 }
 
 function showSharingIndicator() {
-  const title = 'CC Connect · ' + (current.allowControl
+  const filesOnly = current.captureMode === 'files'
+  const title = 'CC Connect · ' + (filesOnly ? nativeText('文件传输', '檔案傳輸', 'File transfer') : current.allowControl
     ? nativeText('正在共享屏幕和键鼠', '正在共享螢幕與鍵鼠', 'Screen and controls shared')
     : nativeText('正在共享屏幕', '正在共享螢幕', 'Screen sharing'))
   window.setTitle(title)
   tray = new Tray(nativeImage.createFromPath(iconPath).resize({ width: 18, height: 18 }))
-  if (process.platform === 'darwin') tray.setTitle(nativeText('共享中', '共享中', 'Sharing'))
+  if (process.platform === 'darwin') tray.setTitle(filesOnly ? nativeText('文件会话', '檔案連線', 'Files') : nativeText('共享中', '共享中', 'Sharing'))
   tray.setToolTip(title)
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: title, enabled: false },
     { label: nativeText('打开 CC Connect', '開啟 CC Connect', 'Open CC Connect'), click: () => { window.show(); window.focus() } },
-    { label: nativeText('结束共享', '結束共享', 'Stop sharing'), click: () => finish('本机已结束共享') }
+    { label: filesOnly ? nativeText('结束连接', '結束連線', 'Disconnect') : nativeText('结束共享', '結束共享', 'Stop sharing'),
+      click: () => finish(filesOnly ? '本机已断开连接' : '本机已结束共享') }
   ]))
 }
 
@@ -140,13 +149,17 @@ function createSession(role, token) {
       case 'request':
         if (active.role !== 'host' || active.phase !== 'pairing') return
         active.phase = 'pending'
+        active.fileSessions = event.fileSessions
+        active.requestedFiles = event.requestedFiles
         window.show()
-        send({ type: 'request', name: event.name, requestId: active.requestId })
+        send({ type: 'request', name: event.name, requestId: active.requestId,
+          fileSessions:event.fileSessions, requestedFiles:event.requestedFiles })
         break
       case 'connected': {
         if ((role === 'host' && active.phase !== 'approving') ||
             (role === 'viewer' && active.phase !== 'pairing')) return finish('配对状态已改变')
         active.phase = 'connected'
+        if (event.mode === 'files') active.captureMode = 'files'
         if (role === 'host') showSharingIndicator()
         const accepted = { type: 'accepted', role, name: event.name, allowControl: active.allowControl,
           requestId: active.requestId, captureMode: active.captureMode || 'screen' }
@@ -204,7 +217,39 @@ function handle(name, fn) {
   })
 }
 
+function roomFiles(requestId) {
+  const active = current
+  if (!active || active.phase !== 'connected' || active.token !== account.approvedToken ||
+      active.requestId !== requestId) throw new Error('file-session')
+  if (!active.files) active.files = new FileTransfer({
+    live: () => current === active && active.token === account.approvedToken,
+    chooseSource: () => localFiles.choose(active, async () => {
+      const result = await dialog.showOpenDialog(window, {
+        title: nativeText('选择要发送的文件', '選擇要傳送的檔案', 'Choose a file to send'),
+        properties: ['openFile', 'dontAddToRecent']
+      })
+      return result.canceled ? null : result.filePaths[0]
+    }),
+    chooseDestination: name => localFiles.choose(active, async () => {
+      const result = await dialog.showSaveDialog(window, {
+        title: nativeText('保存对方发来的文件', '儲存對方傳來的檔案', 'Save the incoming file'),
+        defaultPath: path.join(app.getPath('downloads'), name),
+        properties: ['createDirectory', 'showOverwriteConfirmation', 'dontAddToRecent']
+      })
+      return result.canceled ? null : result.filePath
+    })
+  })
+  return active.files
+}
+
 function registerHandlers() {
+  handle('file-pick', id => roomFiles(id).pick())
+  handle('file-save', (id, offer) => roomFiles(id).save(offer))
+  handle('file-read', (id, file) => roomFiles(id).read(file))
+  handle('file-write', (id, file, chunk) => roomFiles(id).write(file, chunk))
+  handle('file-sent-digest', (id, file) => roomFiles(id).sentDigest(file))
+  handle('file-commit', (id, file, digest) => roomFiles(id).commit(file, digest))
+  handle('file-cancel', (id, file) => roomFiles(id).cancel(file))
   handle('language', locale => {
     if (!['zh-CN', 'zh-TW', 'en'].includes(locale)) return
     language = locale
@@ -223,7 +268,19 @@ function registerHandlers() {
   handle('account-refresh', () => account.refresh())
   handle('open-admin-console', () => adminConsole.open(window, language))
   handle('account-logout', () => account.logout())
-  handle('screen-status', async () => (await capture.inspect(true)).report)
+  handle('screen-status', async () => {
+    const [{ report }, inputPermission] = await Promise.all([
+      capture.inspect(true),
+      process.platform === 'darwin' ? InputBridge.macAccess({ resourcesPath: process.resourcesPath, isPackaged: app.isPackaged }) : null
+    ])
+    const appPath = process.platform === 'darwin' && app.isPackaged ? path.resolve(path.dirname(app.getPath('exe')), '../..') : null
+    return { ...report, inputPermission, appPath }
+  })
+  handle('open-input-settings', async () => {
+    if (process.platform !== 'darwin') throw new Error('control-permission')
+    await shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility')
+    await InputBridge.macAccess({ resourcesPath: process.resourcesPath, isPackaged: app.isPackaged }, true)
+  })
   handle('open-screen-settings', async () => {
     if (process.platform !== 'darwin') throw new Error('source-unavailable')
     await shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture')
@@ -256,14 +313,14 @@ function registerHandlers() {
     try { await preferences.update({...values, relayUrl:''}) } finally { saveInProgress = false }
   })
   for (const role of ['host', 'viewer']) {
-    handle(role === 'host' ? 'host' : 'join', async invite => {
+    handle(role === 'host' ? 'host' : 'join', async (invite, intent) => {
       const token = await account.requireApproved()
       const active = createSession(role, token)
       const options = { name: deviceName }
       try {
         return role === 'host'
           ? await active.network.host(options)
-          : await active.network.join({ ...options, invite })
+          : await active.network.join({ ...options, invite, intent })
       } catch (err) {
         if (current === active) finish(err.message, true)
         throw err
@@ -272,6 +329,7 @@ function registerHandlers() {
   }
   handle('screens', async (requestId, explicitCheck) => {
     const active = requirePending(requestId)
+    if (active.requestedFiles) throw new Error('文件会话未获双方确认。')
     const attempt = active.listAttempt = (active.listAttempt || 0) + 1
     active.choices = null
     active.screenError = null
@@ -281,6 +339,7 @@ function registerHandlers() {
     if (active.listAttempt !== attempt) throw new Error('连接请求已失效。')
     active.screenError = report.errorCode || (revision !== displayRevision ? 'source-unavailable' : null)
     if (active.screenError) throw new Error(active.screenError)
+    active.listedPermission = report.permission
     active.choices = new ScreenChoices(sources, screen.getAllDisplays(), screen.getPrimaryDisplay().id, revision)
     return active.choices.options
   })
@@ -289,6 +348,14 @@ function registerHandlers() {
     active.phase = 'approving'
     try {
       if (await account.requireApproved() !== active.token || current !== active) throw new Error('连接请求已失效。')
+      if (screenId === 'files') {
+        if (!active.fileSessions || allowControl !== false) throw new Error('文件会话未获双方确认。')
+        active.choices = null
+        active.captureMode = 'files'
+        active.network.respond(true, 'files')
+        return
+      }
+      if (active.requestedFiles) throw new Error('文件会话未获双方确认。')
       const permission = capture.permission()
       if (permission === 'restricted') throw new Error('permission-restricted')
       if (screenId === 'system-picker') {
@@ -296,34 +363,28 @@ function registerHandlers() {
             allowControl !== false) throw new Error('source-unavailable')
         active.captureMode = 'system-picker'
       } else {
-        if (permission === 'denied') throw new Error('permission-denied')
         if (!active.choices) throw new Error(active.screenError || 'source-unavailable')
+        const permissionError = screenSelectionError(permission, active.listedPermission)
+        if (permissionError) throw new Error(permissionError)
         const { source, display } = active.choices.select(screenId, screen.getAllDisplays(), displayRevision)
         active.source = source
         active.display = display
         active.captureMode = 'screen'
       }
-      if (allowControl === true && inputSupported) {
-        if (active.display) {
-          active.input = new InputBridge()
-          active.input.on('error', err => disableInput(active, err.message))
-          try {
-            await active.input.start(active.display, { resourcesPath: process.resourcesPath, isPackaged: app.isPackaged })
-            if (!active.controlError && current === active) active.allowControl = true
-          } catch (err) { disableInput(active, err.message) }
-        } else {
-          disableInput(active, '无法匹配所选显示器的坐标，本次仅共享画面。')
+      if (allowControl === true) {
+        if (!inputSupported || !active.display) throw new Error('无法为所选显示器启用键鼠控制。')
+        if (process.platform === 'darwin') {
+          const access = await InputBridge.macAccess({ resourcesPath: process.resourcesPath, isPackaged: app.isPackaged })
+          if (access === 'denied') throw new Error('control-permission')
+          if (access !== 'granted') throw new Error('无法检查键鼠组件，请确认已完整安装 CC Connect。')
         }
       }
-      if (current !== active) { active.input?.stop(); throw new Error('连接请求已失效。') }
+      if (current !== active || active.token !== account.approvedToken) throw new Error('连接请求已失效。')
+      active.controlRequested = allowControl === true
       active.network.respond(true)
-      if (active.controlError) send({ type: 'control-unavailable', message: active.controlError })
     } catch (err) {
       if (current === active && active.phase === 'approving') {
-        active.input?.stop()
-        active.input = null
-        active.allowControl = false
-        active.controlError = null
+        active.controlRequested = false
         active.source = null
         active.display = null
         active.captureMode = null
@@ -345,8 +406,31 @@ function registerHandlers() {
     if (current?.phase !== 'connected' || current.token !== account.approvedToken) throw new Error('连接已结束。')
     current.network.signal(payload)
   })
+  handle('screen-stream-ready', async requestId => {
+    const active = current
+    if (!approvedHost() || active.requestId !== requestId || active.captureMode !== 'screen' ||
+        !active.sourceRequested) throw new Error('连接请求已失效。')
+    const error = screenSelectionError(capture.permission(), active.listedPermission)
+    if (error) throw new Error(error)
+    // Consume the normal capture callback once, after the local renderer
+    // obtained a live OS-gated track for the approved source and request.
+    active.sourceRequested = false
+    if (active.controlRequested) {
+      if (active.input || !active.display) throw new Error('无法为所选显示器启用键鼠控制。')
+      active.input = new InputBridge()
+      active.input.on('error', err => disableInput(active, err.message))
+      await active.input.start(active.display, { resourcesPath: process.resourcesPath, isPackaged: app.isPackaged })
+      if (current !== active || !approvedHost()) { active.input.stop(); throw new Error('连接请求已失效。') }
+      if (active.controlError) throw new Error(active.controlError)
+      active.allowControl = true
+      tray?.destroy()
+      showSharingIndicator()
+    }
+    active.captureGranted = true
+    return active.allowControl
+  })
   ipcMain.on('jianping:input', (event, data) => {
-    if (!trusted(event.senderFrame) || current?.role !== 'host' ||
+    if (localFiles.open || !trusted(event.senderFrame) || current?.role !== 'host' ||
         current.phase !== 'connected' || current.token !== account.approvedToken || !current.allowControl || !current.captureGranted) return
     try { current.input.send(data) } catch (err) { disableInput(current, err.message) }
   })
@@ -363,8 +447,9 @@ function approvedHost() {
 
 function grantSelectedDisplay(request, callback) {
   if (trusted(request.frame) && request.videoRequested && !request.audioRequested &&
-      approvedHost() && current.captureMode === 'screen' && current.source) {
-    current.captureGranted = true
+      approvedHost() && current.captureMode === 'screen' && current.source &&
+      !screenSelectionError(capture.permission(), current.listedPermission)) {
+    current.sourceRequested = true
     callback({ video: current.source })
   } else callback(null)
 }

@@ -178,7 +178,8 @@ async function main() {
         setLanguage:async () => {}, onEvent:listener => { window.qaEvent=listener },
         signal:window.qaSignal, disconnect:window.qaStop, renewIce:window.qaRenewIce,
         ...(host ? {host:window.qaHost,screens:async () => [{id:'synthetic',name:'Generated canvas',primary:true}],
-          accept:async (allow, screen) => { await window.qaAllowCanvas(allow, screen); window.qaControlGranted = allow === true }}
+          accept:async (allow, screen) => { window.qaControlGranted = allow === true; await window.qaAllowCanvas(allow, screen) },
+          screenStreamReady:async () => window.qaControlGranted && window.qaCaptureTrack?.readyState === 'live'}
           : {join:window.qaJoin})
       }
       window.qaTarget = {step:0, delivered:0, down:false, pressed:false}

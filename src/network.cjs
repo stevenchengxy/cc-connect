@@ -88,10 +88,15 @@ async function certificate() {
   return { key: keys.privateKey, cert: pem, pin: b64(hash(new crypto.X509Certificate(pem).raw)) };
 }
 
-function isSignal(x) {
+function isSignal(x, filesOnly = false) {
   if (!x || typeof x !== 'object') return false;
   if (x.type === 'ice-restart') return Object.keys(x).length === 1;
-  if (x.type === 'offer' || x.type === 'answer') return typeof x.sdp === 'string' && x.sdp.length <= 128 * 1024;
+  if (x.type === 'offer' || x.type === 'answer') {
+    if (typeof x.sdp !== 'string' || x.sdp.length > 128 * 1024) return false;
+    if (!filesOnly) return true;
+    const media = x.sdp.split(/\r\n|\r|\n/).filter(line => line.startsWith('m='));
+    return media.length === 1 && media[0].startsWith('m=application ');
+  }
   if (x.type !== 'candidate') return false;
   return x.candidate === null || (typeof x.candidate === 'object' && x.candidate && typeof x.candidate.candidate === 'string' &&
     x.candidate.candidate.length <= 4096 && JSON.stringify(x.candidate).length <= 8192);
@@ -302,7 +307,8 @@ class PairingNetwork extends EventEmitter {
     return direct;
   }
 
-  async join({ invite, name, relayUrl } = {}) {
+  async join({ invite, name, relayUrl, intent = 'screen' } = {}) {
+    if (!['screen','files'].includes(intent)) throw new Error('配对请求格式无效。');
     const code = this.accountOnly ? normalizePairCode(invite) : null;
     const spec = code ? { account: 1, managed: 1 } : invitation(invite);
     if (this.accountOnly && (spec.account !== 1 || spec.managed !== 1 || spec.relay || spec.ips)) {
@@ -339,7 +345,8 @@ class PairingNetwork extends EventEmitter {
       s.peer = p;
       p.salt = crypto.randomBytes(16);
       p.keys = channelKeys(s.secret, p.salt);
-      write(p, { op: 'hello', name: s.name });
+      p.requestedFiles = intent === 'files';
+      write(p, { op: 'hello', name: s.name, fileSessions:1, intent });
     } catch (err) { this.end(s, '', false); throw err; }
   }
 
@@ -380,15 +387,18 @@ class PairingNetwork extends EventEmitter {
   }
 
   receive(s, p, msg) {
-    if (p.phase === 'active' && msg.op === 'signal' && isSignal(msg.payload)) {
+    if (p.phase === 'active' && msg.op === 'signal' && isSignal(msg.payload,p.filesOnly)) {
       this.emit('event', { type: 'signal', payload: msg.payload });
       return;
     }
     if (s.role === 'host' && !s.peer && p.phase === 'initial' && msg.op === 'hello') {
       p.name = peerName(msg.name);
+      p.fileSessions = msg.fileSessions === 1;
+      p.requestedFiles = msg.intent === 'files';
+      if (p.requestedFiles && !p.fileSessions) throw new Error('Invalid file session');
       p.challenge = b64(crypto.randomBytes(24));
       p.phase = 'proof';
-      write(p, { op: 'challenge', value: p.challenge });
+      write(p, { op: 'challenge', value: p.challenge, ...(p.fileSessions && {fileSessions:1}) });
       return;
     }
     if (s.role === 'host' && !s.peer && p.phase === 'proof' && msg.op === 'proof' && msg.value === p.challenge) {
@@ -401,10 +411,12 @@ class PairingNetwork extends EventEmitter {
       for (const other of s.sockets) if (other !== p.ws) other.terminate();
       clearTimeout(p.timeout);
       p.timeout = setTimeout(() => this.end(s, '等待共享端确认超时。'), 90000);
-      this.emit('event', { type: 'request', name: p.name });
+      this.emit('event', { type: 'request', name: p.name, fileSessions:p.fileSessions, requestedFiles:p.requestedFiles });
       return;
     }
     if (s.role === 'viewer' && p.phase === 'initial' && msg.op === 'challenge' && typeof msg.value === 'string' && msg.value.length === 32) {
+      p.fileSessions = msg.fileSessions === 1;
+      if (p.requestedFiles && !p.fileSessions) return this.end(s, '对方版本尚不支持仅传文件，请先更新 CC Connect。');
       p.phase = 'pending';
       clearTimeout(p.timeout);
       p.timeout = setTimeout(() => this.end(s, '等待共享端确认超时。'), 95000);
@@ -412,17 +424,30 @@ class PairingNetwork extends EventEmitter {
       return;
     }
     if (s.role === 'viewer' && p.phase === 'pending') {
-      if (msg.op === 'allow') { p.name = peerName(msg.name); this.connected(s, p); return; }
+      if (msg.op === 'allow') {
+        p.filesOnly = msg.mode === 'files';
+        if ((p.requestedFiles && !p.filesOnly) || (p.filesOnly && !p.fileSessions)) {
+          return this.end(s, '文件会话未获双方确认。');
+        }
+        p.name = peerName(msg.name); this.connected(s, p); return;
+      }
       if (msg.op === 'deny') { this.end(s, '共享端已拒绝请求。'); return; }
     }
     throw new Error('Unexpected signaling message');
   }
 
-  respond(allow) {
+  respond(allow, mode = 'screen') {
     const s = this.state;
     const p = s?.peer;
     if (s?.role !== 'host' || p?.phase !== 'pending' || typeof allow !== 'boolean') throw new Error('当前没有等待确认的请求。');
-    if (allow) { write(p, { op: 'allow', name: s.name }); this.connected(s, p); }
+    if (allow) {
+      if (!['screen','files'].includes(mode) || (mode === 'files' && !p.fileSessions) || (p.requestedFiles && mode !== 'files')) {
+        throw new Error('文件会话未获双方确认。');
+      }
+      p.filesOnly = mode === 'files';
+      write(p, { op: 'allow', name: s.name, ...(p.filesOnly && {mode:'files'}) });
+      this.connected(s, p);
+    }
     else {
       write(p, { op: 'deny' });
       this.end(s, '已拒绝连接请求。', true, p.ws);
@@ -434,7 +459,8 @@ class PairingNetwork extends EventEmitter {
     clearTimeout(p.timeout);
     p.phase = 'active';
     if (p.managedWan) p.ws.active = true;
-    this.emit('event', { type: 'connected', role: s.role, name: p.name, managedWan: p.managedWan });
+    this.emit('event', { type: 'connected', role: s.role, name: p.name, managedWan: p.managedWan,
+      ...(p.filesOnly && {mode:'files'}) });
   }
 
   async getManagedIceServers(renew = false) {
@@ -458,7 +484,7 @@ class PairingNetwork extends EventEmitter {
 
   signal(payload) {
     const p = this.state?.peer;
-    if (p?.phase !== 'active' || !isSignal(payload)) throw new Error('连接尚未就绪或信令无效。');
+    if (p?.phase !== 'active' || !isSignal(payload,p.filesOnly)) throw new Error('连接尚未就绪或信令无效。');
     write(p, { op: 'signal', payload });
   }
 

@@ -2,7 +2,7 @@
 
 const { test } = require('node:test')
 const assert = require('node:assert/strict')
-const { ScreenCapture, ScreenChoices } = require('../src/screen-capture.cjs')
+const { ScreenCapture, ScreenChoices, screenSelectionError } = require('../src/screen-capture.cjs')
 
 const source = { id: 'screen:1:0', display_id: '24', name: 'Display name' }
 
@@ -52,6 +52,30 @@ test('empty sources and managed policy have distinct results', async () => {
   assert.deepEqual((await restricted.inspect(true)).report, { permission: 'restricted', errorCode: 'permission-restricted',
     screenCount: 0, canUseSystemPicker: false })
   assert.equal(reads, 0)
+})
+
+test('explicit successful system enumeration is kept when preflight is stale, without authorizing a revoked selection', async () => {
+  const capture = new ScreenCapture({ platform:'darwin', systemVersion:'26', getPermission:() => 'denied',
+    getSources:async () => [source] })
+  const checked = await capture.inspect(true)
+  assert.equal(checked.report.permission, 'denied')
+  assert.equal(checked.report.errorCode, null)
+  assert.deepEqual(checked.sources, [source])
+  assert.equal(screenSelectionError('denied', checked.report.permission), null)
+  assert.equal(screenSelectionError('denied', 'granted'), 'permission-denied')
+  assert.equal(screenSelectionError('restricted', checked.report.permission), 'permission-restricted')
+  assert.equal((await capture.inspect(false)).report.errorCode, 'permission-denied')
+})
+
+test('a new denial during enumeration or a Windows denial invalidates returned sources', async () => {
+  for (const [platform, initialPermission] of [['darwin', 'granted'], ['darwin', 'not-determined'], ['win32', 'denied']]) {
+    let permission = initialPermission
+    const capture = new ScreenCapture({ platform, systemVersion: '26', getPermission: () => permission,
+      getSources: async () => { permission = 'denied'; return [source] } })
+    const result = await capture.inspect(true)
+    assert.equal(result.report.errorCode, 'permission-denied')
+    assert.equal(result.sources.length, 0)
+  }
 })
 
 test('approval uses the enumerated source and matches the current display only if the topology still agrees', () => {

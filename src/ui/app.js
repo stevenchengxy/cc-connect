@@ -42,7 +42,7 @@ function describeError(error) {
     .replace(/^Error invoking remote method '[^']+': (?:Error: )?/, ''));
 }
 const screenErrors = {
-  'permission-denied':'在录屏设置中允许当前安装的 CC Connect 共享画面。若系统提示重新打开应用，请按提示操作。',
+  'permission-denied':'macOS 拒绝了当前应用的录屏请求。若开关已打开，请在录屏设置重新添加当前运行的 CC Connect，按系统提示退出并重新打开。',
   'permission-pending':'macOS 尚未确认录屏权限。请点「重新读取」请求授权。若录屏设置已开启仍有此提示，请重新添加「应用程序」里的 CC Connect。',
   'permission-restricted':'系统策略限制了录屏，请联系设备管理员。',
   'source-unavailable':'系统暂时无法列出屏幕。请解锁共享端并确认显示器已唤醒，然后重新读取。',
@@ -80,7 +80,7 @@ function renderIslandDetails() {
   $('island-device').textContent = peerName || info.name || '—';
   $('island-device').title = $('island-device').textContent;
   $('island-context-label').textContent = t(room ? '共享权限' : peerName ? '本机设备' : '操作系统');
-  $('island-context').textContent = room ? t(room.allowControl ? '允许键鼠控制' : '仅观看') : peerName ? info.name || '—' : platform;
+  $('island-context').textContent = room ? t(room.filesOnly ? '仅传文件' : room.allowControl ? '允许键鼠控制' : '仅观看') : peerName ? info.name || '—' : platform;
 }
 function expandIsland(expand) {
   $('island-toggle').setAttribute('aria-expanded', String(expand));
@@ -207,6 +207,7 @@ function syncHome() {
   $('host-tab').disabled = !idle && mode !== 'host';
   $('invite-input').disabled = !canPair;
   $('join-button').disabled = !canPair;
+  $('join-files').disabled = !canPair;
   $('host-button').disabled = !canPair;
   $('host-button').hidden = inviting;
   $('invite-box').hidden = phase !== 'listening';
@@ -245,6 +246,8 @@ function cleanRoom() {
   const previous = room;
   room = null;
   if (!previous) return;
+  previous.files.close();
+  $('file-tools').hidden = true;
   cancelMove(); heldButtons.clear();
   clearInterval(previous.statsTimer);
   clearTimeout(previous.connectTimer);
@@ -317,7 +320,7 @@ $('join-form').onsubmit = async (event) => {
     if (generation === token && phase === 'joining') void disconnect('等待时间已到，请确认对方仍在等待配对。', true);
   }, 120_000);
   try {
-    await api.join(invite);
+    await api.join(invite,event.submitter?.id === 'join-files' ? 'files' : 'screen');
     // Registration has claimed this one-use invitation, even if the host
     // later declines or the connection closes without a video frame.
     if (generation === token && $('invite-input').value.trim() === invite) $('invite-input').value = '';
@@ -400,10 +403,25 @@ function renderScreenCheck() {
   $('screen-check').disabled = !!check?.pending;
   label('screen-check', check && !check.pending ? '重新读取' : '检测屏幕');
   $('settings-screen-settings').hidden = !needsRecordingSettings(check?.errorCode);
+  const inputMessages = {
+    granted:'键鼠控制已获辅助功能授权。',
+    denied:'键鼠控制需要辅助功能授权。如果 macOS 要求管理员确认，请联系这台 Mac 的管理员。',
+    unknown:'无法检查键鼠组件，请确认已完整安装 CC Connect。'
+  };
+  const inputMessage = inputMessages[check?.inputPermission];
+  $('input-check-result').textContent = inputMessage ? t(inputMessage) : '';
+  $('input-check-result').hidden = !inputMessage;
+  $('settings-input-settings').hidden = check?.inputPermission !== 'denied';
+  const showPath = check?.appPath && (needsRecordingSettings(check?.errorCode) || check?.inputPermission === 'denied');
+  $('checked-app-path').hidden = !showPath;
+  $('checked-app-path').textContent = showPath ? t('当前运行的应用：{path}', {path:check.appPath}) : '';
   if (!check) return notice('screen-check-result');
   if (check.pending) return notice('screen-check-result', '正在读取屏幕…');
   if (check.errorCode) return notice('screen-check-result', screenErrorMessage(check.errorCode,check.permission), true);
-  notice('screen-check-result', t('可共享的屏幕数量：{count}。', {count:check.screenCount}));
+  const message = ['denied','not-determined'].includes(check.permission)
+    ? '已列出 {count} 块屏幕。请在共享请求中点「重新读取」，选屏后由 macOS 确认本次共享。'
+    : '可共享的屏幕数量：{count}。';
+  notice('screen-check-result', t(message, {count:check.screenCount}));
 }
 $('screen-check').onclick = async () => {
   if (settingsCheck?.pending) return;
@@ -426,6 +444,12 @@ async function openRecordingSettings(noticeId) {
 $('settings-screen-settings').onclick = () => openRecordingSettings('screen-check-result');
 $('consent-screen-settings').onclick = () => openRecordingSettings('consent-notice');
 $('session-screen-settings').onclick = () => openRecordingSettings('session-notice');
+async function openInputSettings(noticeId) {
+  try { await api.openInputSettings(); }
+  catch { notice(noticeId,'无法打开辅助功能设置。',true); }
+}
+$('settings-input-settings').onclick = () => openInputSettings('screen-check-result');
+$('consent-input-settings').onclick = () => openInputSettings('consent-notice');
 $('settings-form').onsubmit = async (event) => {
   event.preventDefault();
   if (phase !== 'idle' || account.status !== 'approved' || !$('advanced-settings').open) return;
@@ -448,6 +472,7 @@ function showSourceFailure(code) {
   $('screens').replaceChildren(new Option(t('暂无可选屏幕'),''));
   $('screens').disabled = true;
   $('allow-control').checked = false;
+  $('consent-input-settings').hidden = true;
   $('allow-control').disabled = true;
   $('accept').disabled = true;
   $('screen-recovery').hidden = false;
@@ -459,7 +484,7 @@ function showSourceFailure(code) {
 }
 async function readConsentScreens(retry = false) {
   const request = pendingRequest;
-  if (!currentRequest(request) || request.busy) return;
+  if (!currentRequest(request) || request.busy || request.requestedFiles || request.approving) return;
   request.busy = true;
   $('retry-screens').disabled = true;
   $('screens').disabled = true;
@@ -471,7 +496,7 @@ async function readConsentScreens(retry = false) {
   notice('consent-notice');
   try {
     const screens = await api.screens(request.id,retry);
-    if (!currentRequest(request)) return;
+    if (!currentRequest(request) || request.approving) return;
     if (!screens.length) { showSourceFailure('no-displays'); return; }
     $('screens').replaceChildren(...screens.map((screen, index) =>
       new Option(screen.name ? translate(screen.name) : t('屏幕 {number}', {number:index + 1}), screen.id, false, !!screen.primary)));
@@ -480,7 +505,7 @@ async function readConsentScreens(retry = false) {
     $('allow-control').disabled = !info.inputSupported;
     $('accept').disabled = false;
   } catch (e) {
-    if (currentRequest(request)) showSourceFailure(describeError(e));
+    if (currentRequest(request) && !request.approving) showSourceFailure(describeError(e));
   } finally {
     if (currentRequest(request)) {
       request.busy = false;
@@ -497,11 +522,21 @@ async function requestConsent(event) {
   $('host-invite').value = '';
   $('host-help').hidden = true;
   phase = 'request'; syncHome();
-  pendingRequest = {id:event.requestId, generation, busy:false};
+  const requestedFiles = event.requestedFiles === true;
+  pendingRequest = {id:event.requestId, generation, busy:false, requestedFiles, fileSessions:event.fileSessions === true};
   peerName = event.name || t('远端设备');
   setStatus('收到连接请求', 'pending');
-  $('consent-title').textContent = t('允许「{name}」查看屏幕？', {name:peerName});
+  $('consent-title').textContent = t(requestedFiles ? '允许与「{name}」传输文件？' : '允许「{name}」查看屏幕？', {name:peerName});
+  $('consent-screen-options').hidden = requestedFiles;
+  $('accept-files').hidden = !pendingRequest.fileSessions;
+  $('accept-files').disabled = false;
+  $('accept-files').className = requestedFiles ? 'primary' : 'secondary';
+  $('accept').hidden = requestedFiles;
+  $('screens').disabled = requestedFiles;
+  $('use-system-picker').hidden = true;
+  notice('consent-notice');
   $('allow-control').checked = false;
+  $('consent-input-settings').hidden = true;
   const controlNote = !info.inputSupported ? '本机仅支持观看。' : info.platform === 'darwin'
     ? '录屏权限用于共享画面。允许键鼠控制还需要 macOS 的「辅助功能」权限。' : '';
   $('control-note').textContent = t(controlNote);
@@ -511,14 +546,16 @@ async function requestConsent(event) {
   $('use-system-picker').disabled = false;
   $('reject').disabled = false;
   $('consent').showModal();
-  await readConsentScreens();
+  if (!requestedFiles) await readConsentScreens();
 }
 $('retry-screens').onclick = () => readConsentScreens(true);
 async function acceptScreen(usePicker) {
   const request = pendingRequest;
-  if (!currentRequest(request) || request.busy) return;
+  if (!currentRequest(request) || request.busy || request.approving || request.requestedFiles) return;
   if (usePicker ? $('use-system-picker').hidden : !$('screens').value || $('accept').disabled) return;
   request.busy = true;
+  request.approving = true;
+  $('accept-files').disabled = true;
   $('use-system-picker').disabled = true;
   $('retry-screens').disabled = true;
   $('accept').disabled = true;
@@ -530,14 +567,18 @@ async function acceptScreen(usePicker) {
     const message = describeError(e);
     if (Object.hasOwn(screenErrors,message)) showSourceFailure(message);
     else {
-      notice('consent-notice',message,true);
-      $('screen-recovery').hidden = false;
+      const needsInputAccess = message === 'control-permission';
+      notice('consent-notice',needsInputAccess ? '键鼠控制尚未获准。开启辅助功能后重试，或取消勾选键鼠控制以仅共享画面。' : message,true);
+      $('consent-input-settings').hidden = !needsInputAccess;
+      $('screen-recovery').hidden = needsInputAccess;
       $('accept').disabled = !$('screens').value;
     }
     $('reject').disabled = false;
     $('use-system-picker').disabled = false;
     $('retry-screens').disabled = false;
     request.busy = false;
+    request.approving = false;
+    $('accept-files').disabled = false;
   }
 }
 $('consent-form').onsubmit = (event) => {
@@ -545,6 +586,22 @@ $('consent-form').onsubmit = (event) => {
   void acceptScreen(false);
 };
 $('use-system-picker').onclick = () => acceptScreen(true);
+$('accept-files').onclick = async () => {
+  const request = pendingRequest;
+  if (!currentRequest(request) || !request.fileSessions || request.approving) return;
+  request.approving = true;
+  $('accept-files').disabled = true;
+  $('reject').disabled = true;
+  try {
+    await api.accept(false,'files',request.id);
+  } catch (e) {
+    if (!currentRequest(request)) return;
+    request.approving = false;
+    $('accept-files').disabled = false;
+    $('reject').disabled = false;
+    notice('consent-notice',describeError(e),true);
+  }
+};
 async function rejectRequest() {
   if (!currentRequest(pendingRequest) || $('reject').disabled) return;
   pendingRequest.declining = true;
@@ -559,7 +616,7 @@ $('reject').onclick = rejectRequest;
 
 function showPermission(value) {
   if (!isCurrent(value)) return;
-  const modeText = value.allowControl
+  const modeText = value.filesOnly ? '仅传文件' : value.allowControl
     ? (value.role === 'host' ? '允许键鼠控制' : '可控制 · Shift + Esc 释放键鼠')
     : '仅观看';
   $('permission-state').textContent = translate(modeText);
@@ -620,11 +677,52 @@ async function scheduleQuality(value, profile) {
     if (isCurrent(value)) notice('session-notice','当前编码器未接受画质限制，将按网络状况发送。');
   } finally { value.adjusting = false; }
 }
+function renderFiles(files) {
+  if (!room || room.files !== files) return;
+  const file = files.active;
+  const result = files.result;
+  const hasProgress = file && ['sending','receiving','confirming','committing'].includes(file.phase);
+  const progress = file?.size ? Math.floor(100 * (file.direction === 'send' ? file.confirmed : file.offset) / file.size) : 100;
+  if (hasProgress) {
+    // Disk acknowledgements can arrive much faster than a visible percentage changes.
+    const displayState = [file.phase,progress,i18n.getLanguage()].join('/');
+    if (file.displayState === displayState) return;
+    file.displayState = displayState;
+  }
+  $('file-tools').hidden = !files.ready && !result;
+  $('file-send').hidden = !files.ready || !!file;
+  $('file-transfer').hidden = !file && !result;
+  $('file-transfer').dataset.phase = file?.phase || (result ? 'done' : '');
+  $('file-name').textContent = file?.name || result?.name || '';
+  $('file-name').title = $('file-name').textContent;
+  $('file-save').hidden = file?.phase !== 'incoming';
+  $('file-cancel').hidden = !file || ['picking','saving','confirming','committing'].includes(file.phase);
+  $('file-cancel').textContent = t(file?.phase === 'incoming' ? '拒绝' : '取消');
+  $('file-progress').hidden = !hasProgress;
+  if (!file) {
+    $('file-status').textContent = result ? t(result.message) : '';
+    return;
+  }
+  const statuses = {
+    picking:'选择要发送的文件…', offered:'等待对方接收', incoming:'对方想发送文件',
+    saving:'选择保存位置…', sending:'正在发送', receiving:'正在接收', confirming:'等待对方校验', committing:'正在校验'
+  };
+  const formattedSize = Intl.NumberFormat(i18n.getLanguage(), {maximumFractionDigits:1});
+  const size = file.size === undefined ? '' : file.size < 1024 ? file.size + ' B' :
+    file.size < 1024 ** 2 ? formattedSize.format(file.size / 1024) + ' KiB' : formattedSize.format(file.size / 1024 ** 2) + ' MiB';
+  if (hasProgress) $('file-progress').value = progress;
+  $('file-status').textContent = [t(statuses[file.phase]),size,hasProgress ? progress + '%' : ''].filter(Boolean).join(' · ');
+}
+$('file-send').onclick = () => room?.files.choose();
+$('file-save').onclick = () => room?.files.accept();
+$('file-cancel').onclick = () => room?.files.cancel();
+
 function attachChannel(value, channel) {
   if (value.channel || channel.label !== 'jianping-control-v1') { channel.close(); return; }
   value.channel = channel;
   channel.onopen = () => {
     if (!isCurrent(value)) return;
+    send(channel, {kind:'file-capability',version:1});
     if (value.role === 'host') sharePermission(value);
     else send(channel, {kind:'quality',profile:quality});
   };
@@ -633,6 +731,13 @@ function attachChannel(value, channel) {
     let payload;
     try { payload = JSON.parse(event.data); } catch { return; }
     if (!payload || typeof payload !== 'object') return;
+    if (payload.kind === 'file-capability' && payload.version === 1) {
+      if (value.role === 'host' && !value.files.channel && !value.files.closed) {
+        try { value.files.attach(value.pc.createDataChannel(window.CCFileChannel.label,{ordered:true,priority:'low'})); }
+        catch { value.files.close(); }
+      }
+      return;
+    }
     if (value.role === 'viewer') {
       if (payload.kind === 'permission') { value.allowControl = payload.allowControl === true; showPermission(value); }
       return;
@@ -680,10 +785,11 @@ function connectionChanged(value) {
   if (!isCurrent(value)) return;
   const state = value.pc.connectionState;
   if (state === 'connected') {
-    clearTimeout(value.connectTimer); clearTimeout(value.lossTimer);
+    if (!value.filesOnly || value.files.ready) clearTimeout(value.connectTimer);
+    clearTimeout(value.lossTimer);
     value.lossTimer = null;
-    setStatus(value.role === 'host' ? '正在共享' : '已连接','live');
-    if (value.role === 'host') {
+    setStatus(value.role === 'host' && !value.filesOnly ? '正在共享' : '已连接','live');
+    if (value.role === 'host' && !value.filesOnly) {
       $('sharing-title').dataset.i18n = '你的屏幕正在共享';
       $('sharing-title').textContent = t('你的屏幕正在共享');
     }
@@ -698,6 +804,7 @@ function connectionChanged(value) {
   }
 }
 function mediaFailureMessage(value) {
+  if (value.filesOnly) return '文件连接失败，请检查两端网络后重试。';
   if (!value.managedWan) return '无法建立媒体连接。跨公网时，请检查两端的 TURN 中继设置。';
   if (value.managedIceUnavailable && !info.turnConfigured) return '已完成公网配对，但未能获取媒体中继凭据，画面也无法直连。请稍后重试或联系服务管理员。';
   if (value.managedTurn && !info.turnConfigured) return '已完成公网配对，但媒体中继未能连接。请稍后重试或联系服务管理员。';
@@ -764,6 +871,10 @@ function renewGrant(value, answering = false) {
   return value.renewing;
 }
 
+function sessionTitle(host,filesOnly) {
+  return filesOnly ? t('与「{name}」传输文件',{name:peerName}) :
+    host ? t('向「{name}」共享屏幕',{name:peerName}) : peerName;
+}
 function startSession(event) {
   if (!['request','joining'].includes(phase)) return;
   if (event.role === 'host' && event.requestId !== pendingRequest?.id) return;
@@ -775,10 +886,12 @@ function startSession(event) {
   syncHome();
   notice('session-notice');
   const host = event.role === 'host';
+  const filesOnly = event.captureMode === 'files';
+  $('session').dataset.mode = filesOnly ? 'files' : 'screen';
   peerName = event.name || peerName || t('远端设备');
-  $('session-title').textContent = host ? t('向「{name}」共享屏幕', {name:peerName}) : peerName;
-  $('viewer-stage').hidden = host; $('host-stage').hidden = !host;
-  $('fullscreen').hidden = host; $('live-quality-wrap').hidden = host;
+  $('session-title').textContent = sessionTitle(host,filesOnly);
+  $('viewer-stage').hidden = host || filesOnly; $('host-stage').hidden = !host || filesOnly;
+  $('fullscreen').hidden = host || filesOnly; $('live-quality-wrap').hidden = host || filesOnly;
   $('sharing-title').dataset.i18n = '正在建立屏幕共享';
   $('sharing-title').textContent = t('正在建立屏幕共享');
   $('session-stats').textContent = t('正在协商加密连接…');
@@ -790,13 +903,21 @@ function startSession(event) {
   const systemPicker = host && event.captureMode === 'system-picker';
   const value = room = {
     pc, baseIce:iceServers, managedURLs:new Set(managedServers.flatMap(server => [server.urls].flat())), role:host ? 'host' : 'viewer',
-    requestId:event.requestId, systemPicker, allowControl:host && !systemPicker && event.allowControl === true,
+    requestId:event.requestId, systemPicker, filesOnly, allowControl:host && !systemPicker && !filesOnly && event.allowControl === true,
     profile:'balanced', managedWan:event.managedWan === true,
     managedIceUnavailable:event.managedIceUnavailable === true,
     managedTurn:managedServers.some(server => [server.urls].flat().some(url => /^turns?:/i.test(url))),
     candidates:[], signaling:Promise.resolve(), adjusting:false
   };
   scheduleGrant(value,event.managedIceExpiresAt);
+  value.files = new window.CCFileChannel(api,event.requestId,files => {
+    renderFiles(files);
+    if (filesOnly && isCurrent(value)) {
+      if (files.ready && pc.connectionState === 'connected') clearTimeout(value.connectTimer);
+      if (files.closed) terminate(value,'文件通道已关闭。');
+    }
+  });
+  renderFiles(value.files);
   showPermission(value);
   pc.onicecandidate = (e) => {
     if (isCurrent(value) && e.candidate) Promise.resolve(api.signal({type:'candidate',candidate:e.candidate.toJSON()}))
@@ -804,10 +925,12 @@ function startSession(event) {
   };
   pc.onconnectionstatechange = () => connectionChanged(value);
   pc.ondatachannel = (e) => {
-    if (value.role === 'viewer' && isCurrent(value)) attachChannel(value,e.channel);
+    if (value.role === 'viewer' && isCurrent(value) && e.channel.label === window.CCFileChannel.label) value.files.attach(e.channel);
+    else if (!filesOnly && value.role === 'viewer' && isCurrent(value)) attachChannel(value,e.channel);
     else e.channel.close();
   };
   pc.ontrack = (e) => {
+    if (filesOnly) { e.track.stop(); return; }
     if (!isCurrent(value) || value.role !== 'viewer' || e.track.kind !== 'video') return;
     $('remote-video').srcObject = new MediaStream([e.track]);
     $('remote-video').play().catch(() => {});
@@ -815,10 +938,13 @@ function startSession(event) {
   value.statsTimer = setInterval(() => readStats(value),1500);
   value.connectTimer = setTimeout(() => {
     const negotiated = value.pc.localDescription && value.pc.remoteDescription;
-    terminate(value, negotiated && value.managedWan ? mediaFailureMessage(value)
+    terminate(value, filesOnly || negotiated && value.managedWan ? mediaFailureMessage(value)
       : '等待画面超时。请核实录屏权限和两端的网络设置。');
   },90_000);
-  if (host) {
+  if (host && filesOnly) {
+    value.files.attach(pc.createDataChannel(window.CCFileChannel.label,{ordered:true,priority:'low'}));
+    void sendOffer(value).catch(e => terminate(value,describeError(e)));
+  } else if (host) {
     attachChannel(value,pc.createDataChannel('jianping-control-v1',{ordered:true}));
     if (systemPicker) {
       label('sharing-title','使用系统选择器共享画面');
@@ -826,6 +952,12 @@ function startSession(event) {
       $('resume-capture').hidden = false;
     } else void capture(value);
   }
+}
+async function sendOffer(value) {
+  const offer = await value.pc.createOffer();
+  if (!isCurrent(value)) return;
+  await value.pc.setLocalDescription(offer);
+  if (isCurrent(value)) await api.signal({type:'offer',sdp:value.pc.localDescription.sdp});
 }
 async function captureScreen(value) {
   if (!value.systemPicker) {
@@ -847,7 +979,7 @@ async function captureScreen(value) {
   return stream;
 }
 async function capture(value) {
-  if (!isCurrent(value) || value.capturing || value.stream) return;
+  if (!isCurrent(value) || value.filesOnly || value.capturing || value.stream) return;
   value.capturing = true;
   $('resume-capture').hidden = true;
   $('session-screen-settings').hidden = true;
@@ -857,16 +989,25 @@ async function capture(value) {
     if (!isCurrent(value)) { stream?.getTracks().forEach(t => t.stop()); return; }
     value.stream = stream;
     const track = stream.getVideoTracks()[0];
-    if (!track) throw new Error('未获取到屏幕画面。');
+    if (!track || track.readyState !== 'live') throw new Error('未获取到屏幕画面。');
     track.onended = () => { if (isCurrent(value)) void disconnect('本机屏幕共享已停止。'); };
+    if (!value.systemPicker) {
+      const allowControl = await api.screenStreamReady(value.requestId);
+      if (!isCurrent(value)) return;
+      if (track.readyState !== 'live') throw new Error('本机屏幕共享已停止。');
+      value.allowControl = allowControl === true;
+      sharePermission(value);
+    }
     value.sender = value.pc.addTrack(track,stream);
-    const offer = await value.pc.createOffer();
-    if (!isCurrent(value)) return;
-    await value.pc.setLocalDescription(offer);
-    if (isCurrent(value)) await api.signal({type:'offer',sdp:value.pc.localDescription.sdp});
+    await sendOffer(value);
   } catch (e) {
     if (!isCurrent(value)) return;
-    if (value.stream) { terminate(value,describeError(e)); return; }
+    if (value.stream) {
+      const code = describeError(e);
+      const message = Object.hasOwn(screenErrors,code) ? screenErrorMessage(code) :
+        code === 'control-permission' ? '键鼠控制需要辅助功能授权。如果 macOS 要求管理员确认，请联系这台 Mac 的管理员。' : code;
+      terminate(value,message); return;
+    }
     let message = '';
     if (value.systemPicker) {
       const code = describeError(e);
@@ -913,7 +1054,7 @@ async function receiveSignal(value, payload) {
   if (value.role === 'viewer') {
     await pc.setLocalDescription(await pc.createAnswer());
     if (isCurrent(value)) await api.signal({type:'answer',sdp:pc.localDescription.sdp});
-  } else scheduleQuality(value,value.profile);
+  } else if (!value.filesOnly) scheduleQuality(value,value.profile);
 }
 $('remote-video').onplaying = () => { $('video-wait').hidden = true; };
 $('fullscreen').onclick = async () => {
@@ -1101,8 +1242,9 @@ function refreshLanguage() {
   renderScreenCheck();
   renderIslandDetails();
   if (room) {
+    renderFiles(room.files);
     showPermission(room);
-    $('session-title').textContent = room.role === 'host' ? t('向「{name}」共享屏幕', {name:peerName}) : peerName;
+    $('session-title').textContent = sessionTitle(room.role === 'host',room.filesOnly);
   }
   setQuality(quality);
   $('device-name').textContent = info.name || t('本机');
@@ -1125,6 +1267,6 @@ if (api) {
   Promise.resolve(api.info()).then(updateInfo).catch(e => notice('home-notice',describeError(e),true));
 } else {
   $('device-name').textContent = t('请使用桌面应用');
-  for (const id of ['join-button','host-button','settings-button','update-button']) $(id).disabled = true;
+  for (const id of ['join-button','join-files','host-button','settings-button','update-button']) $(id).disabled = true;
   notice('home-notice','请在CC Connect桌面应用中打开此页面。');
 }

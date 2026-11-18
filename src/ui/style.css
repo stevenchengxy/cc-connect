@@ -166,6 +166,8 @@ input:not([type="checkbox"]):focus,select:focus-visible { border-color: #637e9e;
 #copy-button { height: 43px; width: 43px; flex-shrink: 0; }
 #waiting { display: flex; align-items: center; gap: 8px; margin-top: 13px; color: var(--muted); font-size: 13px; }
 .text-button { background: none; border: 0; padding: 4px; color: #325980; }
+#join-files { display: block; margin: 6px auto 0; min-height: 32px; font-size: 13px; }
+#consent .dialog-actions { flex-wrap: wrap; }
 #cancel-join { margin-left: auto; }
 .spinner { width: 13px; height: 13px; border: 2px solid #cdd8e5; border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -203,6 +205,13 @@ dialog h2 { overflow-wrap: anywhere; font-size: 24px; line-height: 1.3; font-wei
 .sharing-icon svg { width: 28px; height: 28px; }
 #resume-capture { margin: 17px auto 0; }
 .session-footer { margin-top: 12px; gap: 10px; color: var(--muted); font-size: 12px; flex-wrap: wrap; }
+.file-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 12px; }
+.file-tools button { flex: 0 0 auto; }
+.file-transfer { display: flex; flex: 1 1 280px; align-items: center; gap: 12px; padding: 9px 13px; min-width: 0; border: 1px solid var(--line); border-radius: 12px; background: rgb(255 255 255 / 75%); }
+.file-details { flex: 1; min-width: 0; }
+#file-name { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 13px; font-weight: 600; }
+#file-status { display: block; font-size: 12px; color: var(--muted); }
+#file-progress { width: 100%; height: 5px; accent-color: #355578; }
 .permission-state { color: #455974; border-radius: 99px; background: rgb(255 255 255 / 67%); border: 1px solid rgb(255 255 255 / 92%); padding: 3px 9px; }
 .transport-info { gap: 6px; }
 .transport-info svg { width: 14px; height: 14px; }

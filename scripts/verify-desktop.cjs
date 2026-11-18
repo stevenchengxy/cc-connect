@@ -5,6 +5,7 @@ const os = require('node:os')
 const fs = require('node:fs/promises')
 const { setTimeout: delay } = require('node:timers/promises')
 const { spawn } = require('node:child_process')
+const { randomBytes } = require('node:crypto')
 
 const publicIceOnly = process.argv.includes('--public-ice-only')
 const wan = publicIceOnly || process.argv.includes('--wan')
@@ -46,6 +47,49 @@ async function verifyInternetConnection(page) {
   assert.equal(state, 'connected')
   if (publicIceOnly) assert(['srflx','prflx','relay'].includes(remoteType), 'Selected remote candidate must not be a LAN host')
   return remoteType
+}
+
+async function verifyFileExchange(apps, pages, temp) {
+  const dirs = await Promise.all(['host', 'viewer'].map(role => fs.mkdtemp(path.join(temp, role, 'transfer-qa-'))))
+  const samples = [randomBytes(294913), randomBytes(32769)]
+  for (const [index, dir] of dirs.entries()) {
+    await fs.writeFile(path.join(dir, 'sample.bin'), samples[index])
+    // Substitute only the native chooser in these isolated test processes.
+    // File access, WebRTC transport and the receiving user's UI remain real.
+    await apps[index].evaluate(({ dialog, session }, dir) => {
+      const calls = session.defaultSession.fileDialogCalls = { open:0, save:0 }
+      dialog.showOpenDialog = async () => {
+        calls.open++
+        return { canceled:false, filePaths:[dir + '/sample.bin'] }
+      }
+      dialog.showSaveDialog = async () => {
+        calls.save++
+        return { canceled:false, filePath:dir + '/received.bin' }
+      }
+    }, dir)
+    await pages[index].locator('#file-send').waitFor({state:'visible'})
+  }
+  const expectPhase = (page, phase) => page.waitForFunction(phase =>
+    document.getElementById('file-transfer').dataset.phase === phase, phase)
+  const [host, viewer] = pages
+  await viewer.locator('#file-send').click()
+  await expectPhase(host, 'incoming')
+  await host.locator('#file-cancel').click()
+  await expectPhase(viewer, 'done')
+  assert.equal(await apps[0].evaluate(({ session }) => session.defaultSession.fileDialogCalls.save), 0)
+  await assert.rejects(fs.stat(path.join(dirs[0], 'received.bin')), {code:'ENOENT'})
+  for (const [index, sender] of pages.entries()) {
+    const receiver = pages[1-index]
+    await sender.locator('#file-send').click()
+    await expectPhase(receiver, 'incoming')
+    await receiver.locator('#file-save').click()
+    await expectPhase(receiver, 'done')
+    await expectPhase(sender, 'done')
+    assert.match(await receiver.locator('#file-status').textContent(), /文件已保存/)
+    assert.match(await sender.locator('#file-status').textContent(), /文件已送达/)
+    assert.deepEqual(await fs.readFile(path.join(dirs[1-index], 'received.bin')), samples[index])
+  }
+  console.log('Verified both file directions byte for byte and local refusal without writing a file.')
 }
 
 async function run() {
@@ -215,7 +259,7 @@ async function run() {
       }
       throw Error('The copy action did not deliver the expected invitation to the test clipboard')
     }
-    async function pair(copyCompatible = false) {
+    async function pair(copyCompatible = false, fileOnly = false) {
       await host.locator('#host-button').click()
       await host.locator('#host-invite').waitFor({ state: 'visible' })
       const shortCode = await host.locator('#host-invite').inputValue()
@@ -232,7 +276,7 @@ async function run() {
         assert(legacy.key === key.toString('base64url'), 'Both copy actions must refer to one host invitation')
       }
       await viewer.locator('#invite-input').fill(invite)
-      await viewer.locator('#join-button').click()
+      await viewer.locator(fileOnly ? '#join-files' : '#join-button').click()
       await host.locator('#consent[open]').waitFor()
       assert.equal(await host.locator('#host-invite').isVisible(), false, 'A claimed code must no longer be offered for copying')
       assert.equal(await viewer.locator('#invite-input').inputValue(), '', 'A claimed code must not be reused on reconnection')
@@ -241,6 +285,23 @@ async function run() {
     await pair(!!fixture)
     await host.locator('#reject').click()
     await viewer.waitForFunction(() => document.getElementById('top-status').textContent === '待连接')
+    if (fixture) {
+      const beforeFiles = await readCaptureQA()
+      await setCaptureQA({screenPermission:'restricted',listFails:true})
+      await pair(false,true)
+      assert.equal(await host.locator('#allow-control').isVisible(), false)
+      await host.locator('#accept-files').click()
+      for (const page of [host,viewer]) await page.locator('#session[data-mode="files"]').waitFor()
+      assert.equal((await readCaptureQA()).listCalls, beforeFiles.listCalls)
+      assert.equal((await readCaptureQA()).inputStarts, beforeFiles.inputStarts)
+      assert(await captureIsDenied(), 'A file session must never enable screen capture')
+      assert.equal(await viewer.locator('#remote-video').evaluate(video => video.srcObject), null)
+      await verifyFileExchange(apps, [host,viewer], temp)
+      await host.locator('#end-session').click()
+      await viewer.waitForFunction(() => document.getElementById('top-status').textContent === '待连接')
+      await setCaptureQA({screenPermission:'granted',listFails:false})
+      console.log('Verified approved members can transfer files in a data-only call while screen capture is restricted.')
+    }
     if (localCaptureQA && pickerSupported) {
       await setCaptureQA({listFails:true,cancelPicker:true})
       await pair()
@@ -267,14 +328,47 @@ async function run() {
       await viewer.waitForFunction(() => document.getElementById('top-status').textContent === '待连接')
       console.log('Verified consent-bound synthetic picker, cancellation, retry, decoded frames and view-only mode.')
     }
-    const beforePair = await readCaptureQA()
+    if (localCaptureQA && process.platform === 'darwin') {
+      await setCaptureQA({screenPermission:'denied', listFails:false, inputPermission:'denied'})
+      await pair()
+      await waitForNotice('consent-notice','录屏设置')
+      await host.locator('#retry-screens').click()
+      await host.locator('#allow-control').check()
+      await host.locator('#accept').click()
+      await waitForNotice('consent-notice','键鼠控制尚未获准')
+      assert(await host.locator('#consent-input-settings').isVisible())
+      assert.equal((await readCaptureQA()).inputStarts, 0)
+      assert.equal(await viewer.locator('#remote-video').evaluate(v => v.srcObject), null)
+      await setCaptureQA({inputPermission:'granted'})
+      await host.locator('#accept').click()
+      const resume = host.locator('#resume-capture')
+      if (await resume.isVisible()) await resume.click()
+      await waitForVideo()
+      await viewer.waitForFunction(() => document.getElementById('permission-state').textContent.includes('可控制'))
+      await viewer.locator('#remote-video').click()
+      await viewer.keyboard.press('KeyK')
+      await apps[0].evaluate(async ({session}) => {
+        for (let i = 0; i < 60; i++) {
+          const {inputEvents} = session.defaultSession.captureQA
+          if (inputEvents.some(e => e.kind === 'button' && e.down) &&
+              inputEvents.some(e => e.kind === 'key' && e.code === 'KeyK' && !e.down)) return
+          await new Promise(resolve => setTimeout(resolve, 50))
+        }
+        throw Error('Expected mouse and keyboard input on the approved host')
+      })
+      assert.equal((await readCaptureQA()).inputStarts, 1)
+      await host.locator('#end-session').click()
+      await viewer.waitForFunction(() => document.getElementById('top-status').textContent === '待连接')
+      console.log('Verified approved member control with stale screen preflight, explicit control consent, Accessibility retry, live video, keyboard and mouse delivery to the isolated host input bridge.')
+    }
+    const beforeRetry = await readCaptureQA()
     if (localCaptureQA) await setCaptureQA({screenPermission:process.platform === 'darwin' ? 'denied' : 'granted',listFails:true})
     await pair()
     if (localCaptureQA) {
       if (process.platform === 'darwin') {
         await waitForNotice('consent-notice','录屏设置')
         assert(await host.locator('#consent-screen-settings').isVisible())
-        assert.equal((await readCaptureQA()).listCalls, beforePair.listCalls,
+        assert.equal((await readCaptureQA()).listCalls, beforeRetry.listCalls,
           'An incoming request with denied permission must not prompt for screen access')
         await setCaptureQA({screenPermission:'restricted'})
         await host.locator('#retry-screens').click()
@@ -331,6 +425,7 @@ async function run() {
     assert.match(await viewer.locator('#permission-state').textContent(), /仅观看/)
     await viewer.locator('#live-quality').selectOption('smooth')
     await viewer.waitForFunction(() => /加密(直连|中继)/.test(document.getElementById('session-stats').textContent))
+    if (fixture) await verifyFileExchange(apps, [host, viewer], temp)
     if (wan) {
       const paths = await Promise.all([verifyInternetConnection(host), verifyInternetConnection(viewer)])
       console.log('Verified public pairing at both endpoints. Selected remote ICE candidate types:', paths)

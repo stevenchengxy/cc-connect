@@ -57,6 +57,66 @@ test('pinned direct transport authorizes one session and forwards both signal di
   await roundTrip(t, { address: '127.0.0.1' });
 });
 
+test('file-only pairing permits a data channel after approval and never broadens to video', async t => {
+  const host = new PairingNetwork();
+  const viewer = new PairingNetwork();
+  t.after(() => { viewer.stop(); host.stop(); });
+  const {invite} = await host.host({address:'127.0.0.1'});
+  const requested = next(host,'request');
+  await viewer.join({invite,intent:'files'});
+  const request = await requested;
+  assert.equal(request.fileSessions,true);
+  assert.equal(request.requestedFiles,true);
+  assert.throws(() => host.respond(true,'screen'),/文件会话/);
+  const approvals = Promise.all([next(host,'connected'),next(viewer,'connected')]);
+  host.respond(true,'files');
+  for (const event of await approvals) assert.equal(event.mode,'files');
+  const sdp = 'v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n';
+  const received = next(viewer,'signal');
+  host.signal({type:'offer',sdp});
+  assert.equal((await received).payload.sdp,sdp);
+  assert.throws(() => viewer.signal({type:'answer',sdp:sdp+'m=audio 9 RTP/AVP 0\r\n'}),/信令无效/);
+  assert.throws(() => host.signal({type:'offer',sdp:'m=video 9 RTP/AVP 96\r\n'}),/信令无效/);
+});
+
+test('a file-only request stops before proving the invitation to a legacy host', () => {
+  const viewer = new PairingNetwork();
+  let reason;
+  viewer.end = (_s, message) => { reason = message; };
+  const p = {phase:'initial',requestedFiles:true};
+  viewer.receive({role:'viewer'},p,{op:'challenge',value:'a'.repeat(32)});
+  assert.match(reason,/先更新/);
+  assert.equal(p.phase,'initial');
+});
+
+test('a host may limit a screen request to files only if the viewer advertised support', async t => {
+  for (const legacyViewer of [true,false]) {
+    const host = new PairingNetwork();
+    const viewer = new PairingNetwork();
+    t.after(() => { viewer.stop(); host.stop(); });
+    if (legacyViewer) {
+      // The previous hello contained only op and name.
+      const receive = host.receive.bind(host);
+      host.receive = (s,p,msg) => receive(s,p,msg.op === 'hello' ? {op:'hello',name:msg.name} : msg);
+    }
+    const {invite} = await host.host({address:'127.0.0.1'});
+    const requested = next(host,'request');
+    await viewer.join({invite});
+    const request = await requested;
+    assert.equal(request.requestedFiles,false);
+    assert.equal(request.fileSessions,!legacyViewer);
+    const approved = next(viewer,'connected');
+    if (legacyViewer) {
+      assert.throws(() => host.respond(true,'files'),/文件会话/);
+      host.respond(true);
+      assert.equal((await approved).mode,undefined);
+    } else {
+      host.respond(true,'files');
+      assert.equal((await approved).mode,'files');
+    }
+  }
+});
+
 test('wrong pin, expired invite and wrong key leave the host free to decline a valid viewer', async t => {
   const host = new PairingNetwork();
   const viewer = new PairingNetwork();
