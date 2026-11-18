@@ -25,6 +25,8 @@ jobs:
         run: |
           npm ci --ignore-scripts --no-audit --no-fund
           if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed' }
+          npm install --prefix (Join-Path $env:RUNNER_TEMP 'cc-owned-tools') --ignore-scripts --no-audit --no-fund '@actions/artifact@2.3.2'
+          if ($LASTEXITCODE -ne 0) { throw 'Artifact client installation failed' }
           node node_modules/electron/install.js
           if ($LASTEXITCODE -ne 0) { throw 'Electron installation failed' }
           $csc = Join-Path $env:SystemRoot 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
@@ -33,39 +35,9 @@ jobs:
           $wanSource = (Resolve-Path 'scripts/windows-qa/WanWindowCheck.cs').Path
           & $csc '/nologo' '/target:exe' '/platform:x64' '/define:OWNED_WINDOW_WAN' '/reference:System.Windows.Forms.dll' '/reference:System.Drawing.dll' "/out:$fixture" $baseSource $wanSource
           if ($LASTEXITCODE -ne 0) { throw 'Fixture compilation failed' }
-      - name: Host the owned test window using the disposable QA session
+      - name: Host the owned test window and verify its physical pixels
+        uses: ./scripts/windows-qa/wan-action
         env:
           CC_QA_RUNNER_CLASS: ${{ runner.environment }}
           CC_WAN_QA_SESSION: ${{ secrets.CC_CONNECT_QA_WINDOWS_OWNED_HOST }}
           CC_QA_VIEWER_PUBLIC_KEY: ${{ inputs.viewer_public_key }}
-        shell: pwsh
-        run: |
-          $envelope = Join-Path $env:RUNNER_TEMP 'cc-owned-invite.enc'
-          $out = Join-Path $env:RUNNER_TEMP 'cc-owned-out'
-          $err = Join-Path $env:RUNNER_TEMP 'cc-owned-err'
-          $proc = Start-Process node_modules/electron/dist/electron.exe -ArgumentList @('scripts/verify-wan-cross.cjs','host',$envelope,'control') -RedirectStandardOutput $out -RedirectStandardError $err -PassThru
-          Set-Content (Join-Path $env:RUNNER_TEMP 'cc-owned-pid') $proc.Id
-          for ($i=0;$i -lt 100;$i++) {
-            if ((Test-Path $envelope) -and (Get-Item $envelope).Length -gt 100) { exit 0 }
-            if ($proc.HasExited) { break }
-            Start-Sleep -Milliseconds 500
-          }
-          Get-Content $out | Where-Object {$_ -match '^(Owned Windows form ready|Owned fixture exit code [0-9]+$|Synthetic ICE state)'}
-          Get-Content $err | Where-Object {$_ -match '^The synthetic WAN check did not complete during [a-z ]+$'}
-          throw 'Encrypted invitation not available'
-      - name: Hand encrypted invitation to the designated synthetic viewer
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: cc-owned-window-invitation
-          path: ${{ runner.temp }}/cc-owned-invite.enc
-          retention-days: 1
-          if-no-files-found: error
-      - name: Verify owned-window messages and physical pixels
-        shell: pwsh
-        run: |
-          $id = [int](Get-Content (Join-Path $env:RUNNER_TEMP 'cc-owned-pid'))
-          $proc = Get-Process -Id $id -ErrorAction SilentlyContinue
-          if ($proc -and !$proc.WaitForExit(355000)) {throw 'Owned-window test timed out'}
-          $lines = @(Get-Content (Join-Path $env:RUNNER_TEMP 'cc-owned-out'))
-          $lines | Where-Object {$_ -match '^(Windows owned form confirmed|Host control ICE route|Owned fixture exit code [0-9]+$|PASS real Win32|  (policy|path|local|remote|protocol):)'}
-          if (!($lines -match '^PASS real Win32 window-targeted mouse and KeyA with physical pixels$')) { throw 'Owned-window WAN acceptance failed' }
