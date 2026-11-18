@@ -14,7 +14,6 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 10
     env:
-      CC_QA_RUNNER_CLASS: ${{ runner.environment }}
       CC_QA_OWNED_WINDOWS: '1'
       CC_QA_CHROME: 'C:\Program Files\Google\Chrome\Application\chrome.exe'
     steps:
@@ -34,6 +33,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Fixture compilation failed' }
       - name: Host the owned test window using the disposable QA session
         env:
+          CC_QA_RUNNER_CLASS: ${{ runner.environment }}
           CC_WAN_QA_SESSION: ${{ secrets.CC_CONNECT_QA_WINDOWS_OWNED_HOST }}
           CC_QA_VIEWER_PUBLIC_KEY: ${{ inputs.viewer_public_key }}
         shell: pwsh
