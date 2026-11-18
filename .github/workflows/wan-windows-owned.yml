@@ -29,7 +29,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Electron installation failed' }
           $csc = Join-Path $env:SystemRoot 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
           $fixture = Join-Path $env:RUNNER_TEMP 'CC-OwnedWindow-WAN.exe'
-          & $csc '/nologo' '/target:exe' '/platform:x64' '/define:OWNED_WINDOW_WAN' '/reference:System.Windows.Forms.dll' '/reference:System.Drawing.dll' "/out:$fixture" scripts/windows-qa/NativeWindowCheck.cs scripts/windows-qa/WanWindowCheck.cs
+          $baseSource = (Resolve-Path 'scripts/windows-qa/NativeWindowCheck.cs').Path
+          $wanSource = (Resolve-Path 'scripts/windows-qa/WanWindowCheck.cs').Path
+          & $csc '/nologo' '/target:exe' '/platform:x64' '/define:OWNED_WINDOW_WAN' '/reference:System.Windows.Forms.dll' '/reference:System.Drawing.dll' "/out:$fixture" $baseSource $wanSource
           if ($LASTEXITCODE -ne 0) { throw 'Fixture compilation failed' }
       - name: Host the owned test window using the disposable QA session
         env:
