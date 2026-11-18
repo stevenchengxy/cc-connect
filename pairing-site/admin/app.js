@@ -1,11 +1,11 @@
 'use strict';
 const labels = {
   language:['语言','語言','Language'], console:['管理控制台','管理控制台','Admin console'], signin:['管理员登录','管理員登入','Admin sign in'], user:['账号','帳號','Username'], password:['密码','密碼','Password'],
-  logout:['退出','登出','Sign out'], usage:['本期中继用量','本期中繼用量','Relay usage this period'], refresh:['刷新','重新整理','Refresh'], outgoing:['Cloudflare 出站流量','Cloudflare 輸出流量','Cloudflare outbound'], budget:['中继预算','中繼預算','Relay budget'], relay:['公共中继','公共中繼','Public relay'],
+  logout:['退出','登出','Sign out'], usage:['本期中继用量','本期中繼用量','Relay usage this period'], refresh:['刷新','重新整理','Refresh'], outgoing:['中继出站流量','中繼輸出流量','Relay outbound traffic'],billingPeriod:['账期（UTC）','帳期（UTC）','Billing period (UTC)'], budget:['中继预算','中繼預算','Relay budget'], relay:['公共中继','公共中繼','Public relay'],
   off:['已关闭','已關閉','Off'], protected:['保护模式','保護模式','Protected'], quotaSettings:['中继设置','中繼設定','Relay settings'], accounts:['账号管理','帳號管理','Accounts'], newInvite:['创建邀请码','建立邀請碼','Create invite'], filter:['筛选状态','篩選狀態','Filter by status'], all:['全部状态','全部狀態','All statuses'], approved:['已批准','已核准','Approved'], pending:['待审批','待審核','Pending approval'], suspended:['已停用','已停用','Suspended'], revoked:['已撤销','已撤銷','Revoked'],
   more:['加载更多','載入更多','Load more'], manage:['管理','管理','Manage'], noAccounts:['此状态下没有账号。','此狀態下沒有帳號。','No accounts in this view.'], admin:['管理员','管理員','Administrator'], approveAndSave:['批准账号并保存配额','核准帳號並儲存配額','Approve account and save quota'], approve:['批准使用','核准使用','Approve access'], suspend:['停用账号','停用帳號','Suspend account'], revoke:['永久撤销','永久撤銷','Revoke permanently'], sessions:['退出所有设备','登出所有裝置','Sign out all devices'], quota:['账号配额','帳號配額','Account quota'], copy:['复制','複製','Copy'], copied:['已复制','已複製','Copied'], invite:['一次性邀请码','一次性邀請碼','Single-use invite'], expires:['有效期至','有效期至','Expires'], singleUse:['注册后仍需管理员批准。','註冊後仍需管理員核准。','New accounts require administrator approval.'],
   save:['保存设置','儲存設定','Save settings'], concurrency:['最多同时有效的中继凭据','最多同時有效的中繼憑證','Maximum simultaneous relay credentials'], gb:['本期预算（GB）','本期預算（GB）','Budget for this period (GB)'], policy:['公共中继模式','公共中繼模式','Public relay mode'], check:['统计时间','統計時間','Measured'], active:['有效凭据','有效憑證','Active credentials'], unavailable:['用量暂不可用','用量暫不可用','Usage unavailable'], noData:['本期暂无流量记录','本期暫無流量紀錄','No traffic reported this period'],
-  boundary:['达到预算的 90% 后停止签发凭据。流量统计存在延迟；同一 Cloudflare 账户的其他 Realtime 服务也占用免费额度。','達到預算的 90% 後停止簽發憑證。流量統計存在延遲；同一 Cloudflare 帳戶的其他 Realtime 服務也佔用免費額度。','New credentials stop at 90% of the budget. Metering is delayed. Other Realtime services on the same Cloudflare account also use the shared allowance.'],
+  boundary:['达到预算的 90% 后停止签发凭据。流量统计存在延迟。同一 Cloudflare 账户的其他 Realtime 服务也占用免费额度。','達到預算的 90% 後停止簽發憑證。流量統計存在延遲。同一 Cloudflare 帳戶的其他 Realtime 服務也佔用免費額度。','New credentials stop at 90% of the budget. Metering is delayed. Other Realtime services on the same Cloudflare account also use the shared allowance.'],
   memberBudget:['账号和全局均有可用配额时才能使用中继。配额为零时仍可直连。','帳號和全域均有可用配額時才能使用中繼。配額為零時仍可直連。','Relay needs available account and global quotas. A zero relay quota still allows direct connections.'],
   failed:['操作失败，请刷新后重试。','操作失敗，請重新整理後再試。','Could not complete the action. Refresh and retry.'], unavailableAction:['服务或流量计量暂不可用，请检查服务端配置。','服務或流量計量暫不可用，請檢查伺服器設定。','Service or metering unavailable. Check the server configuration.'], denied:['请使用已批准的管理员账号。','請使用已核准的管理員帳號。','Use an approved administrator account.'], credentials:['账号或密码有误。','帳號或密碼有誤。','Check your username and password.'], expired:['登录已失效，请重新登录。','登入已失效，請重新登入。','Your session expired. Sign in again.'], busy:['请求过于频繁，请稍后再试。','請求過於頻繁，請稍後再試。','Too many requests. Try again later.'], invalid:['请检查数值和预算余量。','請檢查數值和預算餘額。','Check the values and remaining budget.'], done:['已保存。','已儲存。','Saved.'],
   irreversible:['永久撤销后，账号将无法重新启用。','永久撤銷後，帳號將無法重新啟用。','Revocation is permanent. This account cannot be reactivated.'], confirm:['确认撤销','確認撤銷','Confirm revocation'], cancel:['取消','取消','Cancel'], net:['正在读取…','讀取中…','Loading…'], enter:['重新登录','重新登入','Sign in again'], close:['关闭','關閉','Close']
@@ -34,10 +34,16 @@ async function action(button,fn,inDialog=false) {
 }
 function btn(label,fn,cls){const b=element('button',t(label),cls);b.type='button';b.onclick=()=>action(b,fn,true);return b;}
 function decimal(bytes){return new Intl.NumberFormat(locale,{maximumFractionDigits:3}).format(bytes / 1e9)+' GB';}
+function traffic(bytes){
+  const [size,unit]=bytes>=1e9?[1e9,'GB']:bytes>=1e6?[1e6,'MB']:bytes>=1e3?[1e3,'kB']:[1,'B'];
+  return new Intl.NumberFormat(locale,{maximumFractionDigits:2}).format(bytes/size)+' '+unit;
+}
 function usageStamp(info){if(!info?.usage)return t('unavailable');const u=info.usage;
-  return (u.hasRecords?'':t('noData')+' · ')+t('check')+' '+new Date(u.checkedAt).toLocaleString(locale);}
+  const day=d=>new Date(d).toISOString().slice(0,10);
+  const period=t('billingPeriod')+' '+day(u.periodStart)+' – '+day(Date.parse(u.periodEnd)-1);
+  return (u.hasRecords?'':t('noData')+' · ')+period+' · '+t('check')+' '+new Date(u.checkedAt).toLocaleString(locale);}
 function render(){
-  $('bytes').textContent=globalInfo?.usage?decimal(globalInfo.usage.egressBytes):'—';
+  $('bytes').textContent=globalInfo?.usage?traffic(globalInfo.usage.egressBytes):'—';
   $('budget').textContent=globalInfo?decimal(globalInfo.limitBytes):'—';$('mode').textContent=globalInfo?t(globalInfo.mode):'—';
   $('stamp').textContent=globalInfo?usageStamp(globalInfo):'';const rows=$('rows');rows.replaceChildren();
   for(const a of accounts.filter(a=>$('filter').value==='all'||a.status===$('filter').value)){
@@ -78,7 +84,7 @@ async function showAccount(a){
   }
   if(a.status==='approved')controls.append(btn('sessions',async()=>{await api('admin/accounts/'+a.id+'/revoke-sessions','POST');$('details').close();await refresh();}));
   try{const info=await api('admin/usage?accountId='+encodeURIComponent(a.id));if(view!==detailVersion||!$('details').open)return;
-    body.append(element('h3',t('quota')),element('p',t('outgoing')+' · '+(info.usage?decimal(info.usage.egressBytes):'—')),element('p',usageStamp(info)+' · '+t('active')+' '+info.activeGrants,'fine'));
+    body.append(element('h3',t('quota')),element('p',t('outgoing')+' · '+(info.usage?traffic(info.usage.egressBytes):'—')),element('p',usageStamp(info)+' · '+t('active')+' '+info.activeGrants,'fine'));
     if(a.status!=='revoked')quotaForm(body,info,a.id,a.status==='pending');
   }catch(e){if(view===detailVersion)notice(labels[e.message]?e.message:'failed',true);}
 }
