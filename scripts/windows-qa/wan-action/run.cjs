@@ -21,7 +21,7 @@ async function run() {
   const read=createInterface({input:child.stdout})
   read.on('line',line=>{
     if(line==='PASS real Win32 window-targeted mouse and KeyA with physical pixels')pass=true
-    if(/^(PASS real Win32|Owned Windows form ready|Owned fixture exit code [0-9]+$|Windows owned form confirmed|Managed pairing completed|Managed TURN entries|Host control ICE route|  (policy|path|local|remote|protocol):)/.test(line))console.log(line)
+    if(/^(PASS real Win32|Windows test cleanup|Owned Windows form ready|Owned fixture exit code [0-9]+$|Windows owned form confirmed|Managed pairing completed|Managed TURN entries|Host control ICE route|  (policy|path|local|remote|protocol):)/.test(line))console.log(line)
   })
   const errors=createInterface({input:child.stderr})
   errors.on('line',line=>{if(/^The synthetic WAN check did not complete during [a-z ]+$/.test(line))console.log(line)})
@@ -38,6 +38,8 @@ async function run() {
   } finally {
     clearTimeout(finite);if(!finished)child.kill();read.close();errors.close()
     await fs.rm(envelope,{force:true})
+    await fs.rm(path.join(process.env.RUNNER_TEMP,'cc-owned-electron-profile'),
+      {recursive:true,force:true,maxRetries:5,retryDelay:400})
   }
 }
 run().catch(()=>{console.error('Owned Windows WAN acceptance failed.');process.exitCode=1})

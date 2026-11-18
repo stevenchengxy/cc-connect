@@ -26,7 +26,12 @@ const managedUrl = process.env.CC_WAN_QA_PAIR_URL || 'https://cc-connect-pair.st
 const electron = process.versions.electron && require('electron')
 let profile
 if (electron) {
-  profile = fsSync.mkdtempSync(path.join(os.tmpdir(), 'cc-wan-network-'))
+  if (ownedWindows && host && process.platform === 'win32' && process.env.RUNNER_TEMP) {
+    profile = path.join(process.env.RUNNER_TEMP,'cc-owned-electron-profile')
+    fsSync.mkdirSync(profile,{mode:0o700})
+  } else {
+    profile = fsSync.mkdtempSync(path.join(os.tmpdir(), 'cc-wan-network-'))
+  }
   electron.app.setPath('userData', profile)
   electron.app.dock?.hide()
 }
@@ -304,7 +309,9 @@ async function main() {
     clearTimeout(hardTimeout)
     peer.stop()
     nativeWindow?.close()
+    if (nativeWindow) console.log('Windows test cleanup: fixture input closed')
     await browser.close()
+    if (nativeWindow) console.log('Windows test cleanup: browser closed')
     if (ownsInvite) await fs.rm(inviteFile, {force:true})
   }
 }
@@ -315,7 +322,11 @@ main().catch(() => {
   process.exitCode = 1
 }).finally(() => {
   if (electron) {
-    electron.app.once('quit', () => fsSync.rmSync(profile, {recursive:true, force:true}))
+    // Windows can hold profile files until the process has actually exited.
+    // The CI owner removes this specific directory after waiting for the child.
+    if (!(ownedWindows && host && process.platform === 'win32')) {
+      electron.app.once('quit', () => fsSync.rmSync(profile, {recursive:true, force:true}))
+    }
     electron.app.exit(process.exitCode || 0)
   }
 })
