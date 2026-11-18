@@ -21,19 +21,19 @@ internal static class NativeWindowCheck
     static readonly Color Typed = Color.FromArgb(200, 71, 59);
     static readonly Stopwatch clock = Stopwatch.StartNew();
     static void Pump() { Application.DoEvents(); Thread.Sleep(15); }
-    static bool OwnsTarget(Form f, Point center, Point sample) {
+    internal static bool OwnsTarget(Form f, Point center, Point sample) {
         return f.Visible && f.Focused && !f.IsDisposed && GetForegroundWindow()==f.Handle &&
             GetFocus()==f.Handle && WindowFromPoint(center)==f.Handle && WindowFromPoint(sample)==f.Handle;
     }
     static int Skip(string why) { Console.WriteLine("SKIPPED: " + why); return 77; }
-    static bool Pixel(Point sample, Color expected) {
+    internal static bool Pixel(Point sample, Color expected) {
         // Read a single pixel in our solid test window. No desktop image is saved or exported.
         using (var image=new Bitmap(1,1)) {
             using (var g=Graphics.FromImage(image)) g.CopyFromScreen(sample, Point.Empty, new Size(1,1));
             return image.GetPixel(0,0).ToArgb()==expected.ToArgb();
         }
     }
-    static bool Observe(Func<bool> condition, int timeout) {
+    internal static bool Observe(Func<bool> condition, int timeout) {
         long end=clock.ElapsedMilliseconds+timeout;
         do { Pump(); if(condition()) return true; } while(clock.ElapsedMilliseconds<end);
         return false;
@@ -45,12 +45,16 @@ internal static class NativeWindowCheck
         pipe.Write(bytes,0,bytes.Length); pipe.Flush();
     }
 
-    [STAThread] static int Main() {
+    [STAThread] static int Main(string[] args) {
         if(Environment.GetEnvironmentVariable("GITHUB_ACTIONS")!="true" || Environment.GetEnvironmentVariable("CC_QA_RUNNER_CLASS")!="github-hosted" ||
            Environment.GetEnvironmentVariable("RUNNER_OS")!="Windows" || !Environment.UserInteractive || Process.GetCurrentProcess().SessionId==0)
             return Skip("No isolated interactive GitHub-hosted Windows session");
         try {
             if(!SetProcessDpiAwarenessContext(new IntPtr(-4))) return Skip("Physical desktop coordinates unavailable");
+#if OWNED_WINDOW_WAN
+            if(args.Length==1 && args[0]=="--owned-window") return WanWindowCheck.Run();
+#endif
+            if(args.Length!=0) return 1;
             using(var f=new Form()) return Check(f);
         } catch(Exception e) { Console.Error.WriteLine("FAILED: "+e.GetType().Name+" "+e.Message); return 1; }
     }

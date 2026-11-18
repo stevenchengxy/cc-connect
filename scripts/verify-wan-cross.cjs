@@ -2,7 +2,8 @@
 //   npx --no-install electron scripts/verify-wan-cross.cjs host <new-private-file> view|control
 // Pass {view: <invite>, control: <invite>} as a JSON-encoded disposable CI secret.
 // A viewer exercises the app's video surface and control protocol. The host can
-// change only three color states on a generated canvas and cannot inject OS input.
+// change three colors on a canvas by default. An optional GitHub-hosted Windows
+// fixture validates fixed events on its own HWND and streams that form only.
 const { chromium } = require('playwright-core')
 const { PairingNetwork } = require('../src/network.cjs')
 const fs = require('node:fs/promises')
@@ -19,6 +20,7 @@ const controlTest = mode === 'control'
 const rawInvite = process.env.CC_WAN_QA_INVITE
 delete process.env.CC_WAN_QA_INVITE
 const requireRelay = process.env.CC_QA_RELAY_ONLY === '1'
+const ownedWindows = process.env.CC_QA_OWNED_WINDOWS === '1' && controlTest
 // Only the person operating this test chooses its HTTPS service, never an invite.
 const managedUrl = process.env.CC_WAN_QA_PAIR_URL || 'https://cc-connect-pair.stevenchengxy19.chatgpt.site/v1'
 const electron = process.versions.electron && require('electron')
@@ -38,7 +40,7 @@ const peer = new PairingNetwork({
   fetchImpl: electron ? (url, init) => electron.session.defaultSession.fetch(url, {...init, credentials:'omit'}) : undefined
 })
 const viewerName = 'CC Connect synthetic ' + mode + ' viewer'
-const deadline = host ? 235000 : 100000
+const deadline = host ? (ownedWindows ? 330000 : 235000) : 100000
 
 let stage = 'launch'
 
@@ -93,10 +95,15 @@ async function main() {
     ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : '/usr/bin/google-chrome')
   const browser = await chromium.launch({ executablePath, headless: true })
   let ownsInvite = false
-  let page
+  let page, nativeWindow
   const hardTimeout = setTimeout(() => { peer.stop(); void browser.close().catch(() => {}) }, deadline)
   try {
     page = await browser.newPage()
+    if (host && ownedWindows) {
+      nativeWindow=require('./windows-qa/window-bridge.cjs').startWindow()
+      await nativeWindow.ready()
+      console.log('Owned Windows form ready and foreground verified')
+    }
     const events = []
     let consentedControl = false
     let dispatching = Promise.resolve()
@@ -113,8 +120,11 @@ async function main() {
       }).catch(() => { events.push('signaling delivery stopped') })
     })
     const notify = event => page.evaluate(e => window.qaEvent(e), event)
-    // These fixed operations are the entire test bridge. No native input or
-    // desktop capturer is loaded in this process.
+    // The optional CI fixture accepts only a fixed click and KeyA on its own window.
+    if (nativeWindow) {
+      await page.exposeFunction('qaReadWindowFrame',()=>nativeWindow.frame())
+      await page.exposeFunction('qaTestWindowAction',operation=>nativeWindow.input(operation))
+    }
     await page.exposeFunction('qaRenewIce',async () => ({iceServers:await peer.getManagedIceServers(true),expiresAt:peer.managedIceExpiresAt}))
     await page.exposeFunction('qaSignal', signal => peer.signal(signal))
     await page.exposeFunction('qaStop', () => peer.stop())
@@ -131,7 +141,8 @@ async function main() {
           delete spec.port
         }
         const testCode = 'RD1.' + Buffer.from(JSON.stringify(spec)).toString('base64url')
-        await fs.writeFile(inviteFile, testCode, {flag:'wx', mode:0o600})
+        const payload = nativeWindow ? require('./windows-qa/window-bridge.cjs').sealInvite(testCode, process.env.CC_QA_VIEWER_PUBLIC_KEY) : testCode
+        await fs.writeFile(inviteFile, payload, {flag:'wx', mode:0o600})
         ownsInvite = true
         return {...result, invite:testCode}
       })
@@ -146,7 +157,7 @@ async function main() {
       const invite = rawInvite.startsWith('RD1.') ? rawInvite : JSON.parse(rawInvite)[mode]
       await page.exposeFunction('qaJoin', () => peer.join({invite, name:viewerName}))
     }
-    await page.addInitScript(({host, requireRelay}) => {
+    await page.addInitScript(({host, requireRelay, ownedWindows}) => {
       const NativePeer = window.RTCPeerConnection
       window.qaCandidates = {local:new Set(), remote:new Set()}
       window.RTCPeerConnection = class extends NativePeer {
@@ -175,8 +186,8 @@ async function main() {
       }
       window.qaTarget = {step:0, delivered:0, down:false, pressed:false}
       if (host) window.jianping.input = event => {
-        // A finite test surface recognizes one central primary click followed by
-        // one KeyA press. It cannot inject events into a browser tab or the OS.
+        // A finite state machine accepts only one central click followed by KeyA.
+        // The Windows fixture maps those transitions to its own HWND.
         const target = window.qaTarget
         if (event.kind !== 'button' && event.kind !== 'key') return
         target.delivered++
@@ -184,11 +195,11 @@ async function main() {
         if (event.kind === 'button' && event.button === 0 && target.step === 0 &&
             Math.abs(event.x - 0.5) < 0.1 && Math.abs(event.y - 0.5) < 0.1) {
           if (event.down) target.down = true
-          else if (target.down) target.step = 1
+          else if (target.down) {target.step = 1;if (ownedWindows) void window.qaTestWindowAction('CENTER_CLICK')}
         }
         if (event.kind === 'key' && event.code === 'KeyA' && target.step === 1) {
           if (event.down) target.pressed = true
-          else if (target.pressed) target.step = 2
+          else if (target.pressed) {target.step = 2;if (ownedWindows) void window.qaTestWindowAction('KEY_A')}
         }
       }
       Object.defineProperty(navigator.mediaDevices, 'getDisplayMedia', {value:async () => {
@@ -197,7 +208,19 @@ async function main() {
         canvas.width = 320; canvas.height = 240
         const context = canvas.getContext('2d')
         let frame = 0
-        const draw = () => {
+        let pending = false
+        const draw = async () => {
+          if (ownedWindows) {
+            if (pending) return
+            pending=true
+            try {
+              const data=await window.qaReadWindowFrame()
+              if (!data) throw Error('Windows fixture ended')
+              const bitmap = new Image();bitmap.src=data;await bitmap.decode()
+              context.drawImage(bitmap,0,0)
+            } finally { pending=false }
+            return
+          }
           context.fillStyle = ['#ed2020','#20ed20','#2020ed'][window.qaTarget.step]
           context.fillRect(0,0,320,240)
           context.fillStyle = (++frame % 2) ? '#fff' : '#000'
@@ -212,7 +235,7 @@ async function main() {
         window.qaCaptureTrack = stream.getVideoTracks()[0]
         return stream
       }})
-    }, {host, requireRelay})
+    }, {host, requireRelay, ownedWindows})
     await page.goto(pathToFileURL(path.resolve(__dirname, '../src/ui/index.html')).href)
     await page.waitForFunction(() => document.getElementById('device-name').textContent === 'Synthetic test')
     if (host) {
@@ -232,6 +255,10 @@ async function main() {
       assert.equal(target.step, controlTest ? 2 : 0)
       assert.equal(target.delivered, controlTest ? 4 : 0)
       console.log('Host', mode, 'accepted test input events:', target.delivered)
+      if (nativeWindow) {
+        assert(nativeWindow.passed())
+        console.log('PASS real Win32 window-targeted mouse and KeyA with physical pixels')
+      }
     } else {
       // The actual one-time value stays in this process. The UI needs only a
       // nonempty field to exercise the production Join action.
@@ -246,7 +273,7 @@ async function main() {
       console.log('Viewer', mode, 'ICE route', await selectedRoute(page))
       const permission = controlTest ? /Control enabled/i : /View only/i
       await page.locator('#permission-state').filter({hasText:permission}).waitFor({timeout:10000})
-      console.log('Decoded', frames, 'synthetic 320×240 frames after managed pairing.')
+      console.log('Decoded', frames, ownedWindows ? 'owned WinForms window frames after managed pairing.' :'synthetic 320×240 frames after managed pairing.')
       stage = 'checking remote click and keystroke'
       await waitForVideoColor(page, 'red')
       const video = page.locator('#remote-video')
@@ -255,7 +282,7 @@ async function main() {
       await video.press('a')
       const after = await video.evaluate(v => v.getVideoPlaybackQuality().totalVideoFrames)
       await waitForVideoColor(page, controlTest ? 'blue' : 'red', after)
-      console.log(controlTest ? 'Decoded click and KeyA acknowledgments in remote video.' : 'Live view-only surface stayed unchanged after click and KeyA.')
+      console.log(ownedWindows ? 'PASS Mac decoded original Windows form then green and blue after center click and KeyA.' : controlTest ? 'Decoded click and KeyA acknowledgments in remote video.' : 'Live view-only surface stayed unchanged after click and KeyA.')
       await page.locator('#end-session').click()
     }
     assert.deepEqual(events, [])
@@ -276,6 +303,7 @@ async function main() {
   } finally {
     clearTimeout(hardTimeout)
     peer.stop()
+    nativeWindow?.close()
     await browser.close()
     if (ownsInvite) await fs.rm(inviteFile, {force:true})
   }
