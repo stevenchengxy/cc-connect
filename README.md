@@ -9,7 +9,7 @@
 ## 开始连接
 
 1. 两台电脑分别安装 CC Connect。macOS 打开 DMG，将「CC Connect」拖入「应用程序」，遇到同名应用时选择「替换」。Windows x64 运行 EXE 安装器，按提示完成当前用户安装。
-2. 两端都更新至 0.4.6 并登录。新用户向管理员领取 8 位注册邀请码（`XXXX-XXXX`），24 小时内可使用一次。注册后等待管理员审批一次，再在应用内刷新状态。已获批的普通成员可以发起和接受远控与文件传输。
+2. 两端都更新至 0.4.7 并登录。新用户向管理员领取 8 位注册邀请码（`XXXX-XXXX`），24 小时内可使用一次。注册后等待管理员审批一次，再在应用内刷新状态。已获批的普通成员可以发起和接受远控与文件传输。
 3. 在被控电脑选择「共享此机」，点击「生成配对码」，将 12 位配对码（`XXXX-XXXX-XXXX`）私发给对方。短码支持小写、空格和省略横线。若对方仍在使用 0.4.0 至 0.4.3，请点「为旧版复制兼容码」。以前签发且仍然有效的长码也可在新版输入。
 4. 在控制电脑选择「连接设备」，输入配对码并连接。倒计时是等待配对的最长时间（10 分钟）。对方领取并通过验证后，改为等待共享端确认。拒绝、取消或结束连接后，下次连接需要生成新码。等待配对期间短暂断网时，可在原邀请的剩余时间内继续。
 5. 在被控电脑核对请求设备，选择共享屏幕。默认仅观看。需要远程操作时，勾选「允许对方使用键盘和鼠标」，点击「开始共享」。
@@ -58,7 +58,7 @@ npm ci
 npm start
 ```
 
-Mac 上运行 `npm run dist:mac` 可生成临时签名的 Apple Silicon 和 Intel 通用预览 DMG。Windows x64 上运行 `npm run dist:win` 生成 NSIS EXE 安装器。构建产物位于 `release/<版本号>/`。0.4.6 的 Mac 包使用临时签名，Windows 包未进行 Authenticode 签名。
+Mac 上运行 `npm run dist:mac` 可生成临时签名的 Apple Silicon 和 Intel 通用预览 DMG。Windows x64 上运行 `npm run dist:win` 生成 NSIS EXE 安装器。构建产物位于 `release/<版本号>/`。0.4.7 的 Mac 包使用临时签名，Windows 包未进行 Authenticode 签名。
 
 生成 Developer ID 签名的通用 DMG 时，在构建 Mac 的钥匙串安装项目的 Developer ID Application 证书及其私钥，运行 `npm run dist:mac:signed`。有多个匹配身份时，用 `CSC_NAME` 指定证书的 SHA-1 指纹。打包脚本会在生成 DMG 前验证主应用、键鼠组件与系统选屏组件使用同一证书及各自固定的程序标识。后续版本请沿用项目的 Apple Developer 团队。若要同时完成 Apple 公证，可通过 `APPLE_KEYCHAIN_PROFILE` 指定已配置的 notarytool 钥匙串凭据。
 

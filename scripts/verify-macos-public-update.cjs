@@ -4,6 +4,7 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs/promises')
 const os = require('node:os')
 const path = require('node:path')
+const {pathToFileURL} = require('node:url')
 const {createReadStream} = require('node:fs')
 const {createHash} = require('node:crypto')
 const {execFileSync, spawn} = require('node:child_process')
@@ -14,7 +15,8 @@ const {extractFile, uncache} = require('@electron/asar')
 const appPath = '/Applications/CC Connect.app'
 const executable = path.join(appPath,'Contents/MacOS/CC Connect')
 const asarPath = path.join(appPath,'Contents/Resources/app.asar')
-const {verifyManifest} = require('../src/updater.cjs')
+const {verifyManifest, compareVersions} = require('../src/updater.cjs')
+const sourceVersion = process.env.UPDATE_FROM_VERSION
 const targetVersion = require('../package.json').version
 const manifestURL = 'https://cc-connect-desktop.stevenchengxy19.chatgpt.site/updates/latest.json'
 const updates = path.join(os.homedir(),'Library/Application Support/CC Connect/updates')
@@ -81,7 +83,8 @@ async function run() {
   assert.equal(process.platform,'darwin')
   assert.equal(process.env.GITHUB_ACTIONS,'true')
   assert.equal(process.env.RUNNER_ENVIRONMENT,'github-hosted')
-  assert.equal(version(),'0.3.3')
+  assert(compareVersions(targetVersion,sourceVersion) > 0, 'Expected an upgrade from the pinned public distribution')
+  assert.equal(version(),sourceVersion)
   assert(await exists(executable))
   assert(!await exists(profile),'Expected a fresh disposable runner profile')
   const response = await fetch(manifestURL,{signal:AbortSignal.timeout(30000)})
@@ -96,20 +99,21 @@ async function run() {
     return old.address()
   },30000)
   const browser = await chromium.connectOverCDP(ws)
-  const page = await observe(()=>browser.contexts().flatMap(c=>c.pages()).find(p=>p.url().startsWith('file:')),20000)
+  const homeURL = pathToFileURL(path.join(asarPath,'src/ui/index.html')).href
+  const page = await observe(()=>browser.contexts().flatMap(c=>c.pages()).find(p=>p.url()===homeURL),20000)
   const appInfo=await page.evaluate(()=>window.jianping.info())
-  assert.equal(appInfo.version,'0.3.3')
-  console.log('Installed 0.3.3 app opened on fresh',process.arch,'GitHub Mac')
-  const updateButton = page.locator('#update-button')
-  if (!await updateButton.isVisible()) await page.locator('#settings-button').click()
-  await updateButton.click()
+  assert.equal(appInfo.version,sourceVersion)
+  console.log('Installed',sourceVersion,'app opened on fresh',process.arch,'GitHub Mac')
+  await page.locator('#settings-button').click()
+  await page.locator('#settings-dialog[open] #update-button').click()
+  const updateAction = page.locator('#update-dialog[open] #update-action')
   await waitPhase(page,'available',60000)
   assert.equal((await page.evaluate(()=>window.jianping.info())).update.version,targetVersion)
   console.log('Packaged updater accepted the public signed manifest for',targetVersion)
-  await page.locator('#update-action').click()
+  await updateAction.click()
   await waitPhase(page,'ready',240000)
   await checkDownload(manifest.files.mac)
-  await page.locator('#update-action').click()
+  await updateAction.click()
   await observe(()=>old.process.exitCode!==null,70000)
   assert.equal(old.process.exitCode,0)
   await observe(async()=>await exists(asarPath) && version()===targetVersion,60000)
@@ -124,12 +128,16 @@ let stop=Date().addingTimeInterval(25)
 while Date() < stop {
   let apps=NSRunningApplication.runningApplications(withBundleIdentifier:"app.jianping.desktop").filter{!$0.isTerminated}
   if apps.count == 1, apps[0].bundleURL?.path == target, apps[0].isFinishedLaunching, apps[0].processIdentifier != ${old.process.pid} {
-    print("Relaunched ${targetVersion} at the original path with one live instance");exit(0)
+    print(apps[0].processIdentifier);exit(0)
   }
   RunLoop.current.run(until:Date().addingTimeInterval(0.4))
 }
 exit(1)`
-  console.log(execFileSync('/usr/bin/swift',['-'],{input:swift,encoding:'utf8',timeout:60000}).trim())
+  const relaunchedPid = Number(execFileSync('/usr/bin/swift',['-'],{input:swift,encoding:'utf8',timeout:60000}).trim())
+  assert(Number.isSafeInteger(relaunchedPid) && relaunchedPid > 0)
+  execFileSync(executable,[],{stdio:'ignore',timeout:15000})
+  process.kill(relaunchedPid,0)
+  console.log('Relaunched',targetVersion,'at the original path. A second launch exited and the first instance stayed running.')
   const urls=new Set()
   for (const event of JSON.parse(await fs.readFile(netLog,'utf8')).events) {
     if (typeof event.params?.url!=='string') continue
