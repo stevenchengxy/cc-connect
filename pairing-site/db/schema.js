@@ -44,6 +44,7 @@ export const rooms = sqliteTable('rooms', {
   hostSession: text('host_session'),
   enrollment: text('enrollment').notNull(),
   viewer: text('viewer'),
+  allowedViewer: text('allowed_viewer'),
   viewerAccount: text('viewer_account'),
   viewerSession: text('viewer_session'),
   source: text('source').notNull(),

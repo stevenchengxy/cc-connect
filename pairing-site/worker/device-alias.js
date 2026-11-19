@@ -14,8 +14,9 @@ const ownedRoom = 'FROM rooms r WHERE r.id=? AND r.host=? AND r.host_account=? A
 async function lookup(db,alias,actor) {
   // This lookup does not enroll a viewer, consume an invite or issue TURN.
   const row = await db.prepare(`SELECT d.envelope FROM device_aliases d JOIN rooms r ON r.id=d.room
-    WHERE d.alias=? AND d.retired=0 AND d.owner=r.host_account AND r.viewer IS NULL AND ${liveRoom} AND ${signedIn}`)
-    .bind(alias,actor.digest,actor.id).first();
+    WHERE d.alias=? AND d.retired=0 AND d.owner=r.host_account AND r.viewer IS NULL
+    AND (r.allowed_viewer IS NULL OR r.allowed_viewer=?) AND ${liveRoom} AND ${signedIn}`)
+    .bind(alias,actor.id,actor.digest,actor.id).first();
   return row ? Response.json({envelope:row.envelope},{headers}) : reply(404);
 }
 

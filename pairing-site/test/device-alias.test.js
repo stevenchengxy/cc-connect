@@ -118,6 +118,40 @@ test('two installations racing for an unbound locator cannot both become its own
   assert.deepEqual(results.map(r=>r.status).sort(),[201,403]);
 });
 
+test('a renewed room restricts alias lookup and enrollment to the authenticated viewer account', async t => {
+  const {env,room,viewer,host,publish,read} = await setup(t);
+  const other = approvedSession(env);
+  const restarted = fixture(env,room.members);
+  const headers = {'x-cc-sharing':'continuous-v1','x-cc-viewer-account':viewer.id};
+  const register = h => restarted.send('host','POST',undefined,undefined,null,undefined,host.session,h);
+  assert.equal((await register({...headers,'x-cc-viewer-account':''})).status,400);
+  const created = await register(headers);
+  assert.equal(created.status,201);
+  assert.equal(created.headers.get('x-cc-sharing'),'continuous-v1');
+  assert.equal((await register(headers)).status,200);
+  assert.equal((await register({'x-cc-sharing':'continuous-v1'})).status,409,'an existing room cannot be widened');
+  assert.equal((await publish({room:restarted.id,hostToken:restarted.hostToken,envelope:token()})).status,201);
+  assert.equal((await read(other.session)).status,404);
+  assert.equal((await read(viewer.session)).status,200);
+  const claim = (session,h) => restarted.send('viewer','POST',undefined,undefined,null,undefined,session,h);
+  // Even a copied decrypted envelope and a forged account header cannot join.
+  assert.equal((await claim(other.session,headers)).status,404);
+  const freshLogin = token();
+  env.handle.prepare('INSERT INTO account_sessions(digest,account,expires) VALUES(?,?,?)')
+    .run(sha(freshLogin),viewer.id,Date.now()+60000);
+  assert.equal((await claim(freshLogin)).status,201);
+  assert.equal((await claim(other.session)).status,404);
+  const bytes = new Uint8Array(100);
+  assert.equal((await restarted.send('viewer','PUT',1,undefined,bytes,undefined,freshLogin,
+    {'x-cc-viewer-account':other.id})).status,204);
+  const peer = await restarted.send('host','GET',1);
+  assert.equal(peer.status,200);
+  assert.equal(peer.headers.get('x-cc-viewer-account'),viewer.id);
+  const intruder = await restarted.send('host','GET',1,undefined,null,undefined,other.session);
+  assert.equal(intruder.headers.get('x-cc-viewer-account'),null);
+  assert.equal(intruder.status,410);
+});
+
 test('rotation closes an unclaimed room, releases its envelope and permanently retires the locator', async t => {
   const {env,room,alias,host,body,manager,publish,read,retire} = await setup(t);
   await publish();

@@ -50,6 +50,13 @@
       "when": 1795074982420,
       "tag": "0006_persistent_device_aliases",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1795077242732,
+      "tag": "0007_scoped_reconnect_rooms",
+      "breakpoints": true
     }
   ]
 }

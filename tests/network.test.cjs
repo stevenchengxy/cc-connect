@@ -380,6 +380,14 @@ test('an account-bound legacy invitation still reaches the same host consent flo
   assert.equal((await connected).managedWan,true);
 });
 
+test('continuous hosting never advertises an unrestricted room through an older service', async () => {
+  const fixture = managedFixture();
+  const network = new PairingNetwork({...fixture,accountOnly:true,accountToken:randomBytes(32).toString('base64url')});
+  await assert.rejects(network.host({continuous:true}),error => error.fatal && /不支持持续共享/.test(error.message));
+  assert.equal(network.state,null);
+  assert.equal(fixture.attempts.filter(item => item.method === 'DELETE').length,1);
+});
+
 test('managed relay grants refresh before expiry and disappear when renewal is denied', async () => {
   const {Mailbox} = require('../src/managed-mailbox.cjs');
   const time=Date.now(); let calls=0;

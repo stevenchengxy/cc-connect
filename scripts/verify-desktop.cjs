@@ -194,6 +194,73 @@ async function run() {
         return !notice.hidden && notice.textContent.includes(text)
       }, {id,text})
     }
+    if (process.argv.includes('--reconnect') || process.argv.includes('--reconnect-10m')) {
+      assert(localCaptureQA, 'Continuous sharing QA requires the isolated account service')
+      const other = await launch('other')
+      const code = host.locator('#host-invite')
+      await host.locator('#host-tab').click()
+      await host.locator('#host-button').click()
+      await host.locator('#allow-control').check()
+      await host.locator(nativePicker ? '#use-system-picker' : '#accept').click()
+      await code.waitFor({state:'visible'})
+      const address = await code.inputValue()
+      const baseline = await readCaptureQA()
+      const connect = async (page, selector = '#join-button') => {
+        await page.locator('#invite-input').fill(address)
+        await page.locator(selector).click()
+      }
+      const leave = async () => {
+        await viewer.locator('#end-session').click()
+        await viewer.locator('#join-button').waitFor({state:'visible'})
+        await host.waitForFunction(value => {
+          const input = document.getElementById('host-invite')
+          return input.value === value && input.offsetWidth > 0
+        },address)
+      }
+      const screenAndInput = async key => {
+        const before = (await readCaptureQA()).inputEvents.length
+        await connect(viewer)
+        await waitForVideo()
+        await viewer.waitForFunction(() => document.getElementById('permission-state').textContent.includes('可控制'))
+        await viewer.locator('#remote-video').click()
+        await viewer.keyboard.press(key)
+        await apps[0].evaluate(async ({session},{key,before}) => {
+          for (let n = 0; n < 100; n++) {
+            const events = session.defaultSession.captureQA.inputEvents.slice(before)
+            if (events.some(e => e.kind === 'button' && e.down) && events.some(e => e.code === key && !e.down)) return
+            await new Promise(resolve => setTimeout(resolve,50))
+          }
+          throw Error('Missing input on reconnected host')
+        }, {key,before})
+      }
+      await screenAndInput('KeyR')
+      await leave()
+      const idleSince = Date.now()
+      console.log('First connection delivered frames, mouse and keyboard. Viewer disconnected. Host is waiting.')
+      await connect(other)
+      await other.locator('#home-notice.error').waitFor({state:'visible'})
+      assert.equal(await other.locator('#remote-video').evaluate(v => v.srcObject),null)
+      if (process.argv.includes('--reconnect-10m')) await delay(610_000)
+      await screenAndInput('KeyS')
+      console.log('Same code reconnected after ' + Math.round((Date.now()-idleSince)/1000) + ' seconds idle and delivered frames and input.')
+      await leave()
+      await connect(viewer,'#join-files')
+      await viewer.locator('#session[data-mode="files"]').waitFor()
+      assert.equal(await viewer.locator('#remote-video').evaluate(v => v.srcObject),null)
+      await leave()
+      await screenAndInput('KeyT')
+      const after = await readCaptureQA()
+      for (const k of ['nativeStarts','pickerCalls']) assert.equal(after[k],baseline[k])
+      assert.equal(await host.locator('#consent').isVisible(),false)
+      await host.locator('#end-session').click()
+      await host.locator('#host-button').waitFor({state:'visible'})
+      await viewer.locator('#join-button').waitFor({state:'visible'})
+      await connect(viewer)
+      await viewer.locator('#home-notice.error').waitFor({state:'visible'})
+      assert.equal((await readCaptureQA()).nativeActive,0)
+      console.log('Verified third-account refusal, files-only connection with no video, screen resumption, one picker and terminal host stop.')
+      return
+    }
     if (wan) await Promise.all([observeInternetConnection(host), observeInternetConnection(viewer)])
     if (relay) for (const page of [host,viewer]) {
       await page.evaluate(() => {

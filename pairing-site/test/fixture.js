@@ -33,9 +33,9 @@ export function approvedSession(db) {
 
 export function fixture(db,members={host:approvedSession(db),viewer:approvedSession(db)}) {
   const id = token(), proof = token(), hostToken = token(), viewerToken = token();
-  const send = (role, method, seq, bearer = role === 'host' ? hostToken : viewerToken, body = null, enrollment = role === 'host' ? sha(proof) : proof, session=members[role].session) => worker.fetch(new Request(
+  const send = (role, method, seq, bearer = role === 'host' ? hostToken : viewerToken, body = null, enrollment = role === 'host' ? sha(proof) : proof, session=members[role].session, headers={}) => worker.fetch(new Request(
     `https://example.test/v1/rooms/${id}/${role}` + (seq ? `/messages/${seq}` : ''),
-    {method, headers: {authorization:`Bearer ${bearer}`,'x-cc-session':session,'x-viewer-proof':enrollment,'content-type':'application/octet-stream'}, body}
+    {method, headers: {authorization:`Bearer ${bearer}`,'x-cc-session':session,'x-viewer-proof':enrollment,'content-type':'application/octet-stream',...headers}, body}
   ), db);
   return { id, send, hostToken, viewerToken, proof, members };
 }

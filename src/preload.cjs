@@ -47,6 +47,7 @@ contextBridge.exposeInMainWorld('jianping', {
   fileCommit: call('file-commit'),
   fileCancel: call('file-cancel'),
   input: (requestId, payload) => ipcRenderer.send('jianping:input', requestId, payload),
+  endPeer: call('end-peer'),
   disconnect: call('disconnect'),
   copy: call('copy'),
   settings: call('settings'),

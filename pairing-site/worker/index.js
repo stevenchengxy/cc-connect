@@ -16,11 +16,13 @@ const DIGEST_BYTES = 64; // SHA-256 stored as lowercase hex.
 const PACKETS_PER_MINUTE = 32;
 const TOKEN = /^[A-Za-z0-9_-]{43}$/;
 const HEX_DIGEST = /^[0-9a-f]{64}$/;
+const ACCOUNT_ID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
+const CONTINUOUS = 'continuous-v1';
 const PATH = /^\/v1\/rooms\/([A-Za-z0-9_-]{43})\/(host|viewer)(?:\/(?:messages\/([1-9]\d{0,4})|(ice)))?$/;
 const headers = { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' };
 
-function reply(status, body = null) {
-  return new Response(body, { status, headers: body ? { ...headers, 'content-type': 'application/octet-stream' } : headers });
+function reply(status, body = null, extraHeaders) {
+  return new Response(body, {status, headers:{...headers, ...(body && {'content-type':'application/octet-stream'}), ...extraHeaders}});
 }
 
 // Caller and both role owners must still have a current, approved login.
@@ -31,21 +33,28 @@ async function register(db, request, id, role, token, now, actor) {
   const proof = request.headers.get('x-viewer-proof') || '';
   if (role === 'host') {
     if (!HEX_DIGEST.test(proof)) return reply(400);
+    const sharing = request.headers.get('x-cc-sharing');
+    const allowed = request.headers.get('x-cc-viewer-account');
+    if ((sharing !== null && sharing !== CONTINUOUS) ||
+        (allowed !== null && (sharing !== CONTINUOUS || !ACCOUNT_ID.test(allowed)))) return reply(400);
+    const confirmed = sharing === CONTINUOUS ? {'x-cc-sharing':CONTINUOUS} : undefined;
     // Retain only a daily fingerprint of the platform-supplied source IP for admission limits.
     const source = await fingerprint(`${Math.floor(now / 86400000)}|${request.headers.get('cf-connecting-ip') || 'local'}`);
     const [, created] = await db.batch([
       db.prepare('DELETE FROM rooms WHERE id IN (SELECT id FROM rooms WHERE expires <= ? ORDER BY expires LIMIT 8)').bind(now),
-      db.prepare(`INSERT OR IGNORE INTO rooms(id,host,enrollment,source,created,expires,host_account,host_session)
-        SELECT ?,?,?,?,?,?,?,? WHERE ${liveSession('?','?')} AND (SELECT count(*) FROM rooms WHERE closed=0 AND expires>?) < 256
+      db.prepare(`INSERT OR IGNORE INTO rooms(id,host,enrollment,source,created,expires,host_account,host_session,allowed_viewer)
+        SELECT ?,?,?,?,?,?,?,?,? WHERE ${liveSession('?','?')} AND (SELECT count(*) FROM rooms WHERE closed=0 AND expires>?) < 256
         AND (SELECT count(*) FROM rooms WHERE source=? AND created>?) < 12`)
-        .bind(id, token, proof, source, now, now + WAIT_MS, actor.id, actor.digest, actor.digest, actor.id, now, source, now - 60_000)
+        .bind(id, token, proof, source, now, now + WAIT_MS, actor.id, actor.digest, allowed, actor.digest, actor.id, now, source, now - 60_000)
     ]);
-    if (created.meta.changes > 0) return reply(201);
-    const room = await db.prepare(`SELECT host,host_account,host_session,enrollment,closed,expires,
+    if (created.meta.changes > 0) return reply(201,null,confirmed);
+    const room = await db.prepare(`SELECT host,host_account,host_session,enrollment,allowed_viewer,closed,expires,
       (${membersLive}) AS live FROM rooms r WHERE id=?`).bind(id).first();
     if (!room) return reply(429);
     if (room.closed || room.expires <= now || !room.live) return reply(410);
-    return reply(room.host === token && room.host_account === actor.id && room.host_session === actor.digest && room.enrollment === proof ? 200 : 409);
+    const same = room.host === token && room.host_account === actor.id && room.host_session === actor.digest &&
+      room.enrollment === proof && room.allowed_viewer === allowed;
+    return same ? reply(200,null,confirmed) : reply(409);
   }
   if (!TOKEN.test(proof)) return reply(400);
   // Apply admission limits before looking up the room, so successful guesses
@@ -55,7 +64,9 @@ async function register(db, request, id, role, token, now, actor) {
   if (!await rate(db, 'pair-viewer-account|' + actor.id, 15, now, 60_000) ||
       !await rate(db, 'pair-viewer-ip|' + source, 90, now, 60_000)) return reply(429);
   const enrollment = await fingerprint(proof);
-  const room = await db.prepare(`SELECT enrollment,viewer,viewer_account,viewer_session,closed,created,expires FROM rooms r WHERE id=? AND ${membersLive}`).bind(id).first();
+  const eligible = '(r.allowed_viewer IS NULL OR r.allowed_viewer=?)';
+  const room = await db.prepare(`SELECT enrollment,viewer,viewer_account,viewer_session,closed,created,expires FROM rooms r
+    WHERE id=? AND ${eligible} AND ${membersLive}`).bind(id,actor.id).first();
   if (!room) return reply(404);
   if (room.enrollment !== enrollment) return reply(403);
   if (room.closed || room.expires <= now) {
@@ -66,8 +77,8 @@ async function register(db, request, id, role, token, now, actor) {
   }
   if (room.viewer) return reply(room.viewer === token && room.viewer_account === actor.id && room.viewer_session === actor.digest ? 200 : 409);
   const result = await db.prepare(`UPDATE rooms AS r SET viewer=?, expires=?, viewer_account=?, viewer_session=? WHERE id=? AND enrollment=?
-      AND viewer IS NULL AND closed=0 AND expires>? AND ${membersLive} AND ${liveSession('?','?')}`)
-    .bind(token, now + SESSION_MS, actor.id, actor.digest, id, enrollment, now, actor.digest, actor.id).run();
+      AND viewer IS NULL AND closed=0 AND expires>? AND ${eligible} AND ${membersLive} AND ${liveSession('?','?')}`)
+    .bind(token, now + SESSION_MS, actor.id, actor.digest, id, enrollment, now, actor.id, actor.digest, actor.id).run();
   return reply(result.meta.changes ? 201 : 409);
 }
 
@@ -97,7 +108,7 @@ async function receive(env, ctx, id, role, token, seq, now, actor) {
   const db = env.DB;
   // Every shipped client requests N+1 after receiving the complete body of N.
   // A repeated GET N still receives the same ciphertext if a response was lost.
-  const row = await db.prepare(`SELECT r.closed,r.expires,m.bytes,m.size,m.served,
+  const row = await db.prepare(`SELECT r.closed,r.expires,r.viewer_account,m.bytes,m.size,m.served,
     prev.served AS prev_served,prev.size AS prev_size,inspection.expires AS next_check FROM rooms r
     LEFT JOIN messages m ON m.room=r.id AND m.sender=? AND m.seq=?
     LEFT JOIN messages prev ON prev.room=r.id AND prev.sender=? AND prev.seq=?
@@ -120,7 +131,10 @@ async function receive(env, ctx, id, role, token, seq, now, actor) {
     const results = await db.batch(changes);
     if (row.size > 0 && !row.served && !results.at(-1).meta.changes) return reply(410);
   }
-  if (row.size > 0) return reply(200, new Uint8Array(row.bytes));
+  // The host gets the authenticated account attached to this immutable viewer
+  // slot. The peer's encrypted hello can choose a display name, never an ID.
+  if (row.size > 0) return reply(200, new Uint8Array(row.bytes),
+    role === 'host' ? {'x-cc-viewer-account':row.viewer_account} : undefined);
   return reply(row.closed || row.size === 0 ? 410 : 204);
 }
 
@@ -153,8 +167,8 @@ async function submit(db, request, id, role, token, seq, now, actor) {
 async function handle(request, env, ctx) {
   const url = new URL(request.url);
   if (request.method === 'GET' && url.pathname === '/health') {
-    await env.DB.prepare('SELECT EXISTS(SELECT 1 FROM admin_setup), EXISTS(SELECT 1 FROM device_aliases)').first();
-    return Response.json({ service:'cc-connect-pair', protocol:1, deviceCodes:true }, {headers});
+    await env.DB.prepare('SELECT EXISTS(SELECT 1 FROM admin_setup), EXISTS(SELECT 1 FROM device_aliases), EXISTS(SELECT allowed_viewer FROM rooms)').first();
+    return Response.json({ service:'cc-connect-pair', protocol:1, deviceCodes:true, continuousSharing:true }, {headers});
   }
   const accountResponse = await accountRoutes(request,env);
   if (accountResponse) return accountResponse;

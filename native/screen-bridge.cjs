@@ -146,9 +146,19 @@ class NativeScreenCapture extends EventEmitter {
     return true
   }
 
+  pauseFrames() {
+    if (this.closed) return
+    this.credit = false
+    this.child?.stdout.pause()
+    // A static display may never produce another complete sample. The first
+    // request from a new peer must still be able to draw this selection.
+    if (!this.latest) this.latest = this.lastDelivered
+  }
+
   deliver() {
     if (!this.credit || !this.latest) return
     const frame = this.latest
+    this.lastDelivered = frame
     this.latest = null
     this.credit = false
     this.emit('frame', frame)
@@ -166,6 +176,7 @@ class NativeScreenCapture extends EventEmitter {
     clearTimeout(this.timer)
     clearInterval(this.policyTimer)
     this.latest = null
+    this.lastDelivered = null
     if (this.child && !this.exited) {
       this.child.stdin.end()
       this.child.kill('SIGTERM')

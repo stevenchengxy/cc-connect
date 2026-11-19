@@ -42,6 +42,7 @@ html:lang(en) .pairing-main .switcher {
 }
 .pairing-main .switcher button { padding-inline: clamp(12px, 1.8vw, 22px); }
 .pairing-main .field-title { margin-bottom: 10px; font-size: clamp(20px, 2.35vw, 25px); }
+#host-scope { white-space: pre-line; }
 .pairing-entry, .host-entry {
   display: flex;
   gap: 10px;

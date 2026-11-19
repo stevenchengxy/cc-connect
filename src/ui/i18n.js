@@ -4,6 +4,12 @@
 window.ccI18n = (() => {
   const messages = {
     "开启共享": ["開啟分享", "Start sharing"],
+    "停止共享": ["停止分享", "Stop sharing"],
+    "已停止共享。": ["已停止分享。", "Sharing stopped."],
+    "共享已开启 · 等待连接": ["已開啟分享 · 等待連線", "Sharing · Waiting for connection"],
+    "共享已开启 · 正在恢复配对": ["已開啟分享 · 正在恢復配對", "Sharing · Restoring pairing"],
+    "首位持码的已批准成员可连接，此后仅该账号可重连，直到你停止共享。": ["持碼且已獲核准的成員可率先連線，此後僅該帳號可重新連線，直到你停止分享。", "The first approved member with your code can connect. Only that account can reconnect until you stop sharing."],
+    "公网配对服务尚不支持持续共享，请稍后重试。": ["公網配對服務尚不支援持續分享，請稍後再試。", "The public pairing service does not support continuous sharing yet. Try again later."],
     "选屏并开启共享": ["選擇螢幕並開啟分享", "Choose display and share"],
     "选屏并开启仅观看共享": ["選擇螢幕並開啟僅觀看分享", "Choose display for view-only sharing"],
     "每次开启共享，首位持固定码的成员可按你选择的权限连接。": ["每次開啟分享，首位持固定碼的成員可依你選定的權限連線。", "Each time you start sharing, the first member with your code can connect with the access you choose."],

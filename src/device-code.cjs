@@ -45,7 +45,7 @@ function inviteRoom(invite) {
   try { spec = JSON.parse(bytes.toString('utf8')); } catch { throw new Error(invalid); }
   if (!spec || !token(spec.key) || spec.account !== 1 || spec.managed !== 1 ||
       !Number.isSafeInteger(spec.exp) || Object.keys(spec).length !== 4) throw new Error(invalid);
-  if (spec.exp <= Date.now()) throw new Error(unavailable);
+  if (spec.exp <= Date.now()) throw Object.assign(new Error(unavailable),{status:410});
   return hmac(Buffer.from(spec.key, 'base64url'), 'rd1-managed-room').toString('base64url');
 }
 function sealInvite(keys, invite) {
@@ -238,6 +238,24 @@ class DeviceCodes {
     const keys = await deviceKeys(code);
     const envelope = await this.request(keys.alias,session,{method:'GET',signal});
     return openInvite(keys,envelope);
+  }
+
+  // A waiting room may expire between lookup and claim. Resolve the same
+  // locator again within one shared budget for both steps.
+  async connect(value, session, signal, join) {
+    const delays = [1000,3000];
+    for (let attempt = 0; ; attempt++) {
+      if (signal?.aborted) throw new Error('连接已结束。');
+      try {
+        const invite = await this.resolve(value,session,signal);
+        if (signal?.aborted) throw new Error('连接已结束。');
+        return await join(invite);
+      } catch (error) {
+        if (![404,410].includes(error.status) || attempt >= delays.length) throw error;
+        try { await sleep(delays[attempt],undefined,{signal}); }
+        catch { throw new Error('连接已结束。'); }
+      }
+    }
   }
 }
 

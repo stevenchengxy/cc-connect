@@ -140,7 +140,7 @@
 
   <main id="session" hidden>
     <div class="session-head"><h1 id="session-title">正在连接</h1>
-      <div class="session-actions"><button class="icon-button" id="fullscreen" type="button" aria-label="切换全屏" data-i18n-aria-label="切换全屏" title="切换全屏" data-i18n-title="切换全屏" hidden><svg><use href="#i-expand"/></svg></button><button id="end-session" class="danger" type="button"><svg><use href="#i-stop"/></svg><span data-i18n="结束连接">结束连接</span></button></div>
+      <div class="session-actions"><button class="icon-button" id="fullscreen" type="button" aria-label="切换全屏" data-i18n-aria-label="切换全屏" title="切换全屏" data-i18n-title="切换全屏" hidden><svg><use href="#i-expand"/></svg></button><button id="end-session" class="danger" type="button"><svg><use href="#i-stop"/></svg><span id="end-label" data-i18n="结束连接">结束连接</span></button></div>
     </div>
     <div id="viewer-stage" hidden><video id="remote-video" autoplay playsinline muted tabindex="0" aria-label="远程屏幕" data-i18n-aria-label="远程屏幕"></video><p id="video-wait" data-i18n="正在接收远程画面…">正在接收远程画面…</p></div>
     <div id="host-stage" class="card" hidden><span class="sharing-icon"><svg><use href="#i-share"/></svg></span><h2 id="sharing-title">正在建立屏幕共享</h2><button class="primary" type="button" id="resume-capture" hidden data-i18n="开始共享">开始共享</button><button class="text-button" type="button" id="session-screen-settings" hidden data-i18n="打开录屏设置">打开录屏设置</button></div>

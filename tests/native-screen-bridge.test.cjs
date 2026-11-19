@@ -137,6 +137,31 @@ test('cancel, unsupported status and spawn failure reject the waiting selection'
   await assert.rejects(capture.start(), /native-picker-failed/)
 })
 
+test('a new viewer can draw an unchanged selected display without inheriting the previous frame credit', async () => {
+  const { child, capture } = fixture()
+  const frames = []
+  capture.on('frame', frame => frames.push(frame.bytes[2]))
+  const selected = capture.start()
+  child.stdout.write(record(9))
+  await selected
+  assert(capture.requestFrame())
+  assert(capture.requestFrame())
+  capture.pauseFrames()
+  assert.equal(capture.credit, false)
+  assert.equal(child.stdout.isPaused(), true)
+  assert.deepEqual(frames, [9])
+  assert(capture.requestFrame())
+  assert.deepEqual(frames, [9, 9])
+  assert(capture.requestFrame())
+  child.stdout.write(record(10))
+  await tick()
+  assert.deepEqual(frames, [9, 9, 10])
+  capture.stop()
+  capture.pauseFrames()
+  assert.equal(capture.requestFrame(), false)
+  assert.equal(capture.lastDelivered, null)
+})
+
 test('closing while the system chooser is open immediately seals the bridge and releases stdin', async () => {
   const { child, capture } = fixture()
   const selected = capture.start()

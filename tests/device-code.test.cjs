@@ -2,6 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const {on} = require('node:events');
 const { randomBytes, createHmac, createCipheriv, createDecipheriv } = require('node:crypto');
 const fs = require('node:fs/promises');
 const path = require('node:path');
@@ -179,6 +180,49 @@ test('an acknowledged-but-lost publish retries with identical credentials, room 
   assert.equal(f.requests.length,4);
 });
 
+test('fixed-code connection re-resolves a missing alias and an expired claim under one retry budget', async t => {
+  const f = await setup(t), client = f.open(), first = room(), second = room();
+  const code = await client.publish('member.host',f.session,first);
+  let reads = 0, joins = 0;
+  f.reply = () => {
+    reads++;
+    if (reads === 1) return new Response(null,{status:404});
+    return Response.json({envelope:f.records.values().next().value.envelope});
+  };
+  const result = await client.connect(code,f.session,undefined,async invite => {
+    joins++;
+    if (joins === 1) {
+      assert.equal(invite,first.invite);
+      const reply = f.reply;
+      f.reply = null;
+      await client.publish('member.host',f.session,second);
+      f.reply = reply;
+      throw Object.assign(new Error('Claim expired'),{status:410});
+    }
+    return invite;
+  });
+  assert.equal(result,second.invite);
+  assert.equal(reads,3);
+  assert.equal(joins,2);
+});
+
+test('cancelling a fixed-code retry stops the wait and rate limits never cause another lookup', async t => {
+  const f = await setup(t), client = f.open(), code = await client.get('member.host');
+  const controller = new AbortController();
+  let reads = 0;
+  const join = () => assert.fail('No room was resolved');
+  f.reply = () => {
+    reads++;
+    setTimeout(() => controller.abort(),20);
+    return new Response(null,{status:410});
+  };
+  await assert.rejects(client.connect(code,f.session,controller.signal,join),/连接已结束/);
+  assert.equal(reads,1);
+  f.reply = () => { reads++; return new Response(null,{status:429}); };
+  await assert.rejects(client.connect(code,f.session,undefined,join),e => e.status === 429);
+  assert.equal(reads,2);
+});
+
 test('auth, rate limits, aborts and HTTP failures propagate without forgetting the old code', async t => {
   const f=await setup(t), client=f.open(), code=await client.get('member.a');
   f.reply=()=>new Response(null,{status:429});
@@ -214,4 +258,62 @@ test('desktop envelope and host-room credentials interoperate with the actual wo
   const next=await desktop().rotate('qa.host',host.session);
   assert.notEqual(next,code);
   await assert.rejects(desktop().resolve(code,viewer.session),e=>e.status===404);
+});
+
+test('the same device code reconnects the authenticated viewer with fresh room keys after a lost disconnect', async t => {
+  const {database,approvedSession} = await import('../pairing-site/test/fixture.js');
+  const {default:worker} = await import('../pairing-site/worker/index.js');
+  const {PairingNetwork} = require('../src/network.cjs');
+  const f = await setup(t), db = database(t), host = approvedSession(db), viewer = approvedSession(db), stranger = approvedSession(db);
+  const base = 'https://pair.example/v1';
+  let offline = false;
+  const fetchImpl = (url,init) => {
+    if (offline && init.method === 'DELETE') return Promise.reject(new Error('Network disconnected'));
+    return worker.fetch(new Request(url,init),db);
+  };
+  const codes = new DeviceCodes({base,directory:f.directory,storage:f.storage,fetchImpl});
+  const peer = actor => new PairingNetwork({managedUrl:base,fetchImpl,accountOnly:true,accountToken:actor.session});
+  const sharing = peer(host), remote = peer(viewer);
+  t.after(() => { sharing.stop(); remote.stop(); });
+  const advertise = async viewerAccountId => {
+    const offer = await sharing.host({continuous:true,viewerAccountId});
+    const credentials = sharing.hostRoomCredentials();
+    const code = await codes.publish('member.host',host.session,{...credentials,invite:offer.legacyInvite});
+    return {code,credentials,invite:offer.legacyInvite};
+  };
+  const request = async code => {
+    const events = on(sharing,'event',{signal:AbortSignal.timeout(5000)});
+    try {
+      await remote.join({invite:await codes.resolve(code,viewer.session),name:stranger.id});
+      for await (const [event] of events) {
+        if (event.type !== 'request') continue;
+        sharing.respond(true);
+        return event;
+      }
+    } finally { await events.return(); }
+  };
+  const first = await advertise();
+  const member = await request(first.code);
+  assert.equal(member.name,stranger.id);
+  assert.equal(member.viewerAccountId,viewer.id,'the viewer-supplied display name has no authority');
+  offline = true;
+  remote.stop();
+  sharing.stop();
+  await assert.rejects(sharing.closeHostRoom(first.credentials),/网络/);
+  assert.equal(db.handle.prepare('SELECT closed FROM rooms WHERE id=?').get(first.credentials.room).closed,0);
+  offline = false;
+  await sharing.closeHostRoom(first.credentials);
+  await sharing.closeHostRoom(first.credentials);
+  const second = await advertise(member.viewerAccountId);
+  assert.equal(first.code,second.code);
+  assert.notEqual(first.credentials.room,second.credentials.room);
+  assert.notEqual(first.credentials.hostToken,second.credentials.hostToken);
+  assert.notEqual(first.invite,second.invite);
+  await assert.rejects(codes.resolve(first.code,stranger.session),e => e.status === 404);
+  await assert.rejects(peer(stranger).join({invite:second.invite}),e => e.status === 404);
+  assert.equal((await request(first.code)).viewerAccountId,viewer.id);
+  remote.stop(); sharing.stop();
+  await sharing.closeHostRoom(second.credentials);
+  await assert.rejects(codes.resolve(first.code,viewer.session),e => e.status === 404);
+  assert.equal(db.handle.prepare('SELECT count(*) AS n FROM relay_leases').get().n,0);
 });

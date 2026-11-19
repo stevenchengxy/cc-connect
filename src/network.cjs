@@ -8,7 +8,7 @@ const os = require('node:os');
 const { isIP } = require('node:net');
 const WebSocket = require('ws');
 const forge = require('node-forge');
-const { Mailbox } = require('./managed-mailbox.cjs');
+const { Mailbox, validAccountId, deniedAccount } = require('./managed-mailbox.cjs');
 const { validToken, messages } = require('./account.cjs');
 const { makePairCode, normalizePairCode, formatPairCode, pairSecret } = require('./pair-code.cjs');
 
@@ -44,7 +44,7 @@ function invitation(value) {
   let spec;
   try { spec = JSON.parse(Buffer.from(value.trim().slice(INVITE_PREFIX.length), 'base64url').toString()); } catch { fail(); }
   if (!spec || !isDigest(spec.key) || !Number.isSafeInteger(spec.exp)) fail();
-  if (spec.exp < Date.now()) throw new Error('配对邀请已过期，请让共享端创建新邀请。');
+  if (spec.exp < Date.now()) throw Object.assign(new Error('配对邀请已过期，请让共享端创建新邀请。'),{status:410});
   if (spec.managed !== undefined && spec.managed !== 1) fail();
   if (spec.relay && spec.managed) fail();
   if (spec.relay) {
@@ -210,7 +210,7 @@ class PairingNetwork extends EventEmitter {
   }
 
   async mailbox(s) {
-    const mailbox = new Mailbox(this.managedUrl, s.role, s.secret, this.fetchImpl, this.accountToken);
+    const mailbox = new Mailbox(this.managedUrl, s.role, s.secret, this.fetchImpl, this.accountToken, s.sharing);
     s.sockets.add(mailbox);
     try {
       await mailbox.register();
@@ -234,9 +234,13 @@ class PairingNetwork extends EventEmitter {
     if (this.state !== s) throw new Error('连接已结束。');
   }
 
-  async host({ name, address, relayUrl } = {}) {
+  async host({ name, address, relayUrl, continuous = false, viewerAccountId } = {}) {
+    if ((continuous && !this.accountOnly) || (viewerAccountId != null && (!continuous || !validAccountId(viewerAccountId)))) {
+      throw new Error('配对邀请格式无效，请复制完整邀请。');
+    }
     const code = this.accountOnly ? makePairCode() : null;
     const s = this.begin('host', name, code ? null : crypto.randomBytes(32));
+    if (continuous) s.sharing = {viewerAccountId};
     try {
       if (code) {
         s.secret = await pairSecret(code);
@@ -320,6 +324,26 @@ class PairingNetwork extends EventEmitter {
       }
     }
     throw new Error('连接已结束。');
+  }
+
+  // Replay the original host's authenticated DELETE before readvertising.
+  // A lost reply or a concurrent mailbox termination is safe to retry.
+  async closeHostRoom({room, hostToken}, signal) {
+    if (!this.accountOnly || !validToken(room) || !validToken(hostToken)) throw new Error('连接已结束。');
+    const url = new URL(this.managedUrl);
+    if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) throw new Error('连接已结束。');
+    url.pathname = url.pathname.replace(/\/$/, '') + '/rooms/' + room + '/host';
+    const timeout = AbortSignal.timeout(5000);
+    let response;
+    try {
+      response = await this.fetchImpl(url.href, {method:'DELETE', credentials:'omit', redirect:'error',
+        cache:'no-store', signal:signal ? AbortSignal.any([signal,timeout]) : timeout,
+        headers:{authorization:'Bearer ' + hostToken,'x-cc-session':this.accountToken}});
+    } catch { throw new Error('无法访问公网配对服务，请检查网络和系统代理后重试。'); }
+    const denied = await deniedAccount(response);
+    await response.body?.cancel();
+    if (response.status !== 204) throw Object.assign(new Error(denied || '无法访问公网配对服务，请检查网络和系统代理后重试。'),
+      {status:response.status, fatal:!!denied});
   }
 
   async join({ invite, name, relayUrl, intent = 'screen' } = {}) {
@@ -429,7 +453,8 @@ class PairingNetwork extends EventEmitter {
       for (const other of s.sockets) if (other !== p.ws) other.terminate();
       clearTimeout(p.timeout);
       p.timeout = setTimeout(() => this.end(s, '等待共享端确认超时。'), 90000);
-      this.emit('event', { type: 'request', name: p.name, fileSessions:p.fileSessions, requestedFiles:p.requestedFiles });
+      this.emit('event', { type: 'request', name: p.name, fileSessions:p.fileSessions, requestedFiles:p.requestedFiles,
+        ...(s.sharing && {viewerAccountId:p.ws.viewerAccountId}) });
       return;
     }
     if (s.role === 'viewer' && p.phase === 'initial' && msg.op === 'challenge' && typeof msg.value === 'string' && msg.value.length === 32) {

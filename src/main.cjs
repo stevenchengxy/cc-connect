@@ -25,6 +25,7 @@ const managedUrl = 'https://cc-connect-pair.stevenchengxy19.chatgpt.site/v1'
 const inputSupported = ['darwin', 'win32'].includes(process.platform)
 const systemVersion = process.platform === 'darwin' ? process.getSystemVersion() : ''
 const nativeOptions = { resourcesPath: process.resourcesPath, isPackaged: app.isPackaged }
+const inputPermissionMessage = '键鼠控制需要辅助功能授权。如果 macOS 要求管理员确认，请联系这台 Mac 的管理员。'
 const nativePickerSupported = supportsNativePicker(process.platform, systemVersion)
 const deviceName = os.hostname().replace(/\.local$/i, '').slice(0, 64) || '我的电脑'
 const capture = new ScreenCapture({
@@ -107,19 +108,29 @@ function trusted(frame) {
     frame === window.webContents.mainFrame && frame.url === pageUrl)
 }
 
+function closePeer(active) {
+  active.controller.abort()
+  active.allowControl = false
+  if (active.input) inputDrained = Promise.all([inputDrained, active.input.stop()]).then(() => {})
+  void active.files?.cancel()
+  active.network.stop()
+}
+
 function finish(reason = '连接已结束', error = false) {
   codeRotation?.controller.abort()
   diagnosticCapture?.stop()
   const active = current
   current = null
   if (!active) return
-  active.controller.abort()
   if (pickerGrant) disarmSystemPicker(pickerGrant.id)
-  active.allowControl = false
-  if (active.input) inputDrained = Promise.all([inputDrained, active.input.stop()]).then(() => {})
+  const share = active.share
+  if (share) {
+    clearTimeout(share.retry)
+    clearInterval(share.permissionCheck)
+    if (share.room) void active.network.closeHostRoom(share.room).catch(() => {})
+  }
+  closePeer(active)
   active.nativeCapture?.bridge.stop()
-  void active.files?.cancel()
-  active.network.stop()
   if (active.previousThrottling !== undefined && window && !window.isDestroyed() && !window.webContents.isDestroyed()) {
     window.webContents.setBackgroundThrottling(active.previousThrottling)
   }
@@ -133,12 +144,14 @@ function finish(reason = '连接已结束', error = false) {
 }
 
 function showSharingIndicator() {
-  const filesOnly = current.captureMode === 'files'
-  const title = 'CC Connect · ' + (filesOnly ? nativeText('文件传输', '檔案傳輸', 'File transfer') : current.allowControl
+  const filesOnly = current.captureMode === 'files' && !current.share
+  const waiting = current.share && current.phase !== 'connected'
+  const title = 'CC Connect · ' + (waiting ? nativeText('共享已开启，等待连接', '共享已開啟，等待連線', 'Sharing on, waiting for a connection')
+    : current.captureMode === 'files' ? nativeText('文件传输', '檔案傳輸', 'File transfer') : current.allowControl
     ? nativeText('正在共享屏幕和键鼠', '正在共享螢幕與鍵鼠', 'Screen and controls shared')
     : nativeText('正在共享屏幕', '正在共享螢幕', 'Screen sharing'))
   window.setTitle(title)
-  tray = new Tray(nativeImage.createFromPath(iconPath).resize({ width: 18, height: 18 }))
+  if (!tray) tray = new Tray(nativeImage.createFromPath(iconPath).resize({ width: 18, height: 18 }))
   if (process.platform === 'darwin') tray.setTitle(filesOnly ? nativeText('文件会话', '檔案連線', 'Files') : nativeText('共享中', '共享中', 'Sharing'))
   tray.setToolTip(title)
   tray.setContextMenu(Menu.buildFromTemplate([
@@ -171,8 +184,8 @@ function createSession(role, token) {
         active.fileSessions = event.fileSessions
         active.requestedFiles = event.requestedFiles
         if (active.preparedInvite) {
-          send({type:'invite-claimed', requestId:active.requestId, name:event.name})
-          void admitPreparedPeer(active)
+          send({type:'invite-claimed', shareId:active.share?.id, requestId:active.requestId, name:event.name})
+          void admitPreparedPeer(active, event.viewerAccountId)
           break
         }
         window.show()
@@ -181,20 +194,20 @@ function createSession(role, token) {
         break
       case 'connected': {
         if ((role === 'host' && active.phase !== 'approving') ||
-            (role === 'viewer' && active.phase !== 'pairing')) return finish('配对状态已改变')
+            (role === 'viewer' && active.phase !== 'pairing')) return endPeer(active, '配对状态已改变')
         active.phase = 'connected'
         if (event.mode === 'files') active.captureMode = 'files'
         if (role === 'host') showSharingIndicator()
         const accepted = { type: 'accepted', role, name: event.name, allowControl: active.allowControl,
-          requestId: active.requestId, captureMode: active.captureMode || 'screen', controlRequested: active.controlRequested === true }
+          shareId:active.share?.id, requestId: active.requestId, captureMode: active.captureMode || 'screen', controlRequested: active.controlRequested === true }
         if (event.managedWan) {
           active.pendingSignals = []
           active.network.getManagedIceServers().then(iceServers => {
             if (current !== active) return
             send({ ...accepted, allowControl: active.allowControl, managedWan: true, managedIceServers: iceServers, managedIceExpiresAt: active.network.managedIceExpiresAt, managedIceUnavailable: active.network.managedIceUnavailable })
-            for (const signal of active.pendingSignals) send({ type: 'signal', signal })
+            for (const signal of active.pendingSignals) send({ type: 'signal', requestId:active.requestId, signal })
             active.pendingSignals = null
-          }).catch(() => { if (current === active) finish('公网连接初始化失败，请重新配对。') })
+          }).catch(() => endPeer(active, '公网连接初始化失败，请重新配对。'))
         } else {
           send(accepted)
         }
@@ -203,12 +216,13 @@ function createSession(role, token) {
       case 'signal':
         if (active.phase !== 'connected') return
         if (active.pendingSignals) {
-          if (active.pendingSignals.length >= 128) return finish('连接消息过多，请重新配对。')
+          if (active.pendingSignals.length >= 128) return endPeer(active, '连接消息过多，请重新配对。')
           active.pendingSignals.push(event.payload)
-        } else send({ type: 'signal', signal: event.payload })
+        } else send({ type: 'signal', requestId:active.requestId, signal: event.payload })
         break
       case 'closed':
-        finish(event.reason || '对方已断开连接')
+        if (event.fatal || isAccountError(event.reason)) finish(event.reason, true)
+        else endPeer(active, event.reason || '对方已断开连接')
         break
     }
   })
@@ -221,10 +235,93 @@ function requireLiveSession(active) {
   }
 }
 
+function isAccountError(message) {
+  return [messages.account_required, messages.account_pending, messages.account_suspended, messages.account_revoked].includes(message)
+}
+
+function startContinuousShare(active) {
+  const {captureMode, controlRequested, listedPermission, display, nativeCapture, previousThrottling} = active
+  const share = active.share = {
+    id:active.requestId, failures:0,
+    selection:{captureMode, controlRequested, listedPermission, display, nativeCapture, previousThrottling}
+  }
+  const originalPermission = capture.permission()
+  let nextInputCheck = Date.now() + 30_000
+  share.permissionCheck = setInterval(() => {
+    if (current?.share !== share) return
+    if (account.approvedToken !== current.token) return finish(messages.account_required, true)
+    const permission = capture.permission()
+    if (permission === 'restricted' || (originalPermission === 'granted' && permission === 'denied') ||
+        (captureMode === 'screen' && screenSelectionError(permission, listedPermission))) {
+      return finish('系统未允许本次录屏请求。请检查当前应用的录屏设置。', true)
+    }
+    if (process.platform === 'darwin' && share.selection.controlRequested && display && Date.now() >= nextInputCheck) {
+      nextInputCheck = Date.now() + 30_000
+      void InputBridge.macAccess(nativeOptions).then(access => {
+        if (current?.share === share && share.selection.controlRequested && access === 'denied') finish(inputPermissionMessage, true)
+      })
+    }
+  }, 2000)
+  share.permissionCheck.unref()
+  showSharingIndicator()
+}
+
+function endPeer(active, reason) {
+  if (current !== active) return
+  const share = active.share
+  if (!share) return finish(reason)
+  if (active.token !== account.approvedToken) return finish(messages.account_required, true)
+  current = null
+  active.nativeCapture?.bridge.pauseFrames()
+  closePeer(active)
+  const next = createSession('host', active.token)
+  Object.assign(next, share.selection, {share, preparedInvite:true, sourceRequested:share.selection.captureMode === 'screen'})
+  showSharingIndicator()
+  send({type:'share-waiting', shareId:share.id, requestId:next.requestId})
+  // Peer exits and normal expiration re-advertise immediately. Consecutive
+  // failures while offline back off, retaining just the local capture grant.
+  const delay = share.failures === 0 ? 0 : Math.min(30_000, 500 * 2 ** Math.min(share.failures - 1, 6))
+  share.failures++
+  share.retry = setTimeout(() => {
+    if (current === next) void advertiseShare(next).catch(() => {})
+  }, delay)
+  share.retry.unref()
+}
+
+async function advertiseShare(active) {
+  const share = active.share
+  try {
+    if (share.room) {
+      await active.network.closeHostRoom(share.room, active.controller.signal)
+      requireLiveSession(active)
+      share.room = null
+    }
+    const result = await publishDeviceInvite(active)
+    requireLiveSession(active)
+    share.failures = 0
+    const ready = {...result, shareId:share.id, requestId:active.requestId}
+    send({type:'share-ready', ...ready})
+    return ready
+  } catch (error) {
+    if (current === active) {
+      if (error.fatal || isAccountError(error.message) || [400,401,403,410].includes(error.status) ||
+          error.message === '无法使用系统安全凭据存储，请解锁钥匙串后重试。') {
+        finish(error.message, true)
+        throw error
+      }
+      endPeer(active, error.message)
+    }
+    if (current?.share !== share) throw error
+    return {shareId:share.id, requestId:current.requestId, retrying:true}
+  }
+}
+
 async function publishDeviceInvite(active) {
-  const sessionInvite = await active.network.host({name:deviceName})
+  const share = active.share
+  const sessionInvite = await active.network.host({name:deviceName, ...(share && {continuous:true, viewerAccountId:share.viewerAccountId})})
   requireLiveSession(active)
   const registration = active.network.hostRoomCredentials()
+  if (share) share.room = registration
   const invite = await deviceCodes.publish(active.username, active.token,
     {...registration, invite:sessionInvite.legacyInvite}, active.controller.signal)
   requireLiveSession(active)
@@ -249,18 +346,26 @@ function discardHostScreen(active) {
   active.captureMode = null
 }
 
-async function admitPreparedPeer(active) {
+async function admitPreparedPeer(active, viewerAccountId) {
+  const share = active.share
   try {
-    // PairingNetwork emitted this event only after the first peer proved
-    // possession of this invite. Recheck membership at the point of admission.
-    if (await account.requireApproved() !== active.token) throw new Error(messages.account_required)
+    // Continuous rooms authenticate both accounts in the mailbox before the
+    // invite proof arrives. The display name sent by the viewer is untrusted.
+    if (share) {
+      if (!viewerAccountId || (share.viewerAccountId && share.viewerAccountId !== viewerAccountId)) {
+        return endPeer(active, '共享端已拒绝请求。')
+      }
+    } else if (await account.requireApproved() !== active.token) throw new Error(messages.account_required)
     requireHostPhase(active.requestId, 'pending')
     const filesOnly = active.requestedFiles || active.captureMode === 'files'
     if (filesOnly && !active.fileSessions) throw new Error('对方版本尚不支持仅传文件，请先更新 CC Connect。')
     if (filesOnly && active.captureMode !== 'files') {
-      discardHostScreen(active)
+      if (!share) {
+        discardHostScreen(active)
+        send({type:'discard-prepared-screen', requestId:active.requestId})
+      }
       active.captureMode = 'files'
-      send({type:'discard-prepared-screen', requestId:active.requestId})
+      active.controlRequested = false
     }
     if (active.captureMode === 'screen' && screenSelectionError(capture.permission(), active.listedPermission)) {
       throw new Error('系统未允许本次录屏请求。请检查当前应用的录屏设置。')
@@ -268,22 +373,27 @@ async function admitPreparedPeer(active) {
     if (!filesOnly && capture.permission() === 'restricted') throw new Error('系统策略限制了录屏，请联系设备管理员。')
     active.phase = 'approving'
     active.network.respond(true, filesOnly ? 'files' : 'screen')
+    if (share) share.viewerAccountId = viewerAccountId
   } catch (error) {
-    if (current === active) finish(error.message, true)
+    if (current !== active) return
+    if (share && active.phase === 'approving') endPeer(active, error.message)
+    else finish(error.message, true)
   }
 }
 
 function disableInput(active, message) {
   if (current !== active) return
+  if (active.share && message === 'control-permission') return finish(inputPermissionMessage, true)
+  // A failed helper must not silently regain control on the next connection.
+  // Keep only the remaining view-only grant until the host starts a new share.
+  if (active.share) active.share.selection.controlRequested = false
   active.allowControl = false
   active.nativeCapture?.bridge.restoreViewOnlyCursor()
   active.controlError = message || '键鼠控制不可用，本次仅共享画面。'
   active.input?.stop()
   if (active.phase === 'connected') {
-    tray?.destroy()
-    tray = null
     showSharingIndicator()
-    send({ type: 'control-unavailable', message: active.controlError })
+    send({ type: 'control-unavailable', requestId:active.requestId, message: active.controlError })
   }
 }
 
@@ -331,7 +441,7 @@ function registerHandlers() {
     if (!['zh-CN', 'zh-TW', 'en'].includes(locale)) return
     language = locale
     updateApplicationMenu()
-    if (tray) { tray.destroy(); tray = null; showSharingIndicator() }
+    if (tray) showSharingIndicator()
   })
   handle('info', async () => {
     const token = account.approvedToken
@@ -387,9 +497,10 @@ function registerHandlers() {
     nativeSelection(requestId, captureId)
     finish('本机已结束共享')
   })
-  handle('renew-ice', async () => {
+  handle('renew-ice', async requestId => {
     const active = current
-    if (!active || active.phase !== 'connected' || active.token !== account.approvedToken) throw new Error(messages.account_required)
+    if (!active || active.phase !== 'connected' || active.token !== account.approvedToken ||
+        ((active.share || requestId !== undefined) && requestId !== active.requestId)) throw new Error('连接已结束。')
     const iceServers = await active.network.getManagedIceServers(true)
     if (current !== active || active.token !== account.approvedToken) throw new Error('连接已结束。')
     return {iceServers, expiresAt:active.network.managedIceExpiresAt, unavailable:active.network.managedIceUnavailable}
@@ -422,12 +533,12 @@ function registerHandlers() {
         if (await account.requireApproved() !== active.token) throw new Error(messages.account_required)
         requireLiveSession(active)
         if (role === 'host') return await publishDeviceInvite(active)
-        let resolved = invite
-        if (normalizeDeviceCode(invite)) {
-          resolved = await deviceCodes.resolve(invite, active.token, active.controller.signal)
+        const join = resolved => {
+          requireLiveSession(active)
+          return active.network.join({name:deviceName, invite:resolved, intent})
         }
-        requireLiveSession(active)
-        return await active.network.join({name:deviceName, invite:resolved, intent})
+        if (normalizeDeviceCode(invite)) return await deviceCodes.connect(invite, active.token, active.controller.signal, join)
+        return await join(invite)
       } catch (err) {
         if (current === active) finish(err.message, true)
         throw err
@@ -456,6 +567,10 @@ function registerHandlers() {
         active.captureMode === 'system-picker' && !active.systemPicked) throw new Error('未获取到屏幕画面。')
     active.phase = 'pairing'
     active.preparedInvite = true
+    if (['screen', 'native-display', 'system-picker'].includes(active.captureMode)) {
+      startContinuousShare(active)
+      return advertiseShare(active)
+    }
     try {
       if (await account.requireApproved() !== active.token) throw new Error(messages.account_required)
       requireHostPhase(requestId, 'pairing')
@@ -545,8 +660,9 @@ function registerHandlers() {
     active.network.respond(false)
     if (current === active) finish('已拒绝请求')
   })
-  handle('signal', payload => {
-    if (current?.phase !== 'connected' || current.token !== account.approvedToken) throw new Error('连接已结束。')
+  handle('signal', (payload, requestId) => {
+    if (current?.phase !== 'connected' || current.token !== account.approvedToken ||
+        ((current.share || requestId !== undefined) && requestId !== current.requestId)) throw new Error('连接已结束。')
     current.network.signal(payload)
   })
   handle('screen-stream-ready', async (requestId, captureId) => {
@@ -575,7 +691,6 @@ function registerHandlers() {
       if (current !== active || !approvedHost()) { active.input.stop(); throw new Error('连接请求已失效。') }
       if (active.controlError) throw new Error(active.controlError)
       active.allowControl = true
-      tray?.destroy()
       showSharingIndicator()
     }
     active.captureGranted = true
@@ -587,7 +702,16 @@ function registerHandlers() {
         !current.allowControl || !current.captureGranted) return
     try { current.input.send(data) } catch (err) { disableInput(current, err.message) }
   })
-  handle('disconnect', () => finish('本机已断开连接'))
+  handle('end-peer', requestId => {
+    if (current?.requestId === requestId && ['pending','approving','connected'].includes(current.phase)) {
+      endPeer(current, '对方已断开连接')
+    }
+  })
+  handle('disconnect', requestId => {
+    if (requestId !== undefined && requestId !== current?.requestId) return false
+    finish('本机已断开连接')
+    return true
+  })
   handle('copy', text => {
     if (typeof text !== 'string' || text.length > 16384) throw new Error('无法复制邀请。')
     clipboard.writeText(text)
@@ -599,7 +723,7 @@ function approvedHost() {
 }
 
 function maySelectDisplay() {
-  return approvedHost() || (current?.role === 'host' && current.phase === 'prepared' &&
+  return (approvedHost() && !current.share) || (current?.role === 'host' && current.phase === 'prepared' &&
     current.token === account.approvedToken)
 }
 
@@ -645,15 +769,17 @@ async function pickNativeDisplay(requestId) {
   const bridge = createNativeCapture(!active.controlRequested)
   const selection = active.nativeCapture = { id: randomUUID(), bridge }
   bridge.on('frame', ({ width, height, bytes }) => {
-    if (current !== active || !approvedHost() || active.nativeCapture !== selection || !trusted(window?.webContents.mainFrame)) return
-    if (!selection.delivered) {
-      selection.delivered = true
-      active.sourceRequested = true
+    const peer = current
+    if (!approvedHost() || peer.captureMode !== 'native-display' || peer.nativeCapture !== selection ||
+        !trusted(window?.webContents.mainFrame)) return
+    if (!peer.nativeFrameSeen) {
+      peer.nativeFrameSeen = true
+      peer.sourceRequested = true
     }
-    send({ type: 'native-frame', requestId, captureId: selection.id, width, height, bytes })
+    send({ type: 'native-frame', requestId:peer.requestId, captureId: selection.id, width, height, bytes })
   })
   bridge.on('ended', reason => {
-    if (current === active && active.nativeCapture === selection && selection.displayId) {
+    if (current?.nativeCapture === selection && selection.displayId) {
       if (reason === 'permission-restricted') return finish('系统策略限制了录屏，请联系设备管理员。', true)
       finish(reason === 'native-picker-ended' ? '本机已结束共享' : '画面来源已结束，请重新配对。')
     }
@@ -808,9 +934,10 @@ if (primaryInstance) app.whenReady().then(async () => {
     screen.on(event, (_event, display, changedMetrics) => {
       const geometryChanged = event !== 'display-metrics-changed' || changedMetrics?.some(key => key !== 'workArea')
       if (geometryChanged) displayRevision++
-      if (current?.captureMode === 'native-display' && !geometryChanged) return
+      const selectedMode = current?.share?.selection.captureMode || current?.captureMode
+      if (selectedMode === 'native-display' && !geometryChanged) return
       if (current?.display?.id === display.id || current?.nativeCapture?.displayId === display.id ||
-          (current?.captureMode === 'screen' && !current.display && event !== 'display-metrics-changed')) {
+          (selectedMode === 'screen' && !current.display && event !== 'display-metrics-changed')) {
         finish('共享显示器配置已更改，请重新配对')
       }
     })

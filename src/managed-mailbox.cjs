@@ -11,11 +11,18 @@ const OPEN = 1;
 const CLOSING = 2;
 const CLOSED = 3;
 const CLOSE_DRAIN_MS = 5000;
+const CONTINUOUS = 'continuous-v1';
+const validAccountId = value => typeof value === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(value);
 const transient = status => status === 408 || status === 429 || status >= 500;
 const blockedAtEdge = response => response.headers.get('cf-mitigated') === 'challenge' ||
   (response.status === 403 && response.headers.get('content-type')?.includes('text/html'));
 
 const unreachable = '无法访问公网配对服务，请检查网络和系统代理后重试。';
+async function deniedAccount(response) {
+  if (![401,403].includes(response.status) || !response.headers.get('content-type')?.includes('application/json')) return null;
+  const {error} = await readJSON(response).catch(() => ({}));
+  return ['account_required','account_pending','account_suspended','account_revoked'].includes(error) ? messages[error] : null;
+}
 function registrationFailure(response, role) {
   if (response.status === 410) {
     const reason = response.headers.get('x-cc-invite-state');
@@ -59,7 +66,7 @@ function iceServers(config) {
 }
 
 class Mailbox extends EventEmitter {
-  constructor(base, role, secret, fetchImpl, accountToken) {
+  constructor(base, role, secret, fetchImpl, accountToken, sharing) {
     super();
     const url = new URL(base);
     if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) throw new Error('Invalid managed pairing service URL');
@@ -71,6 +78,7 @@ class Mailbox extends EventEmitter {
     this.authHeaders = { authorization:this.authorization, ...(accountToken && { 'x-cc-session':accountToken }) };
     this.fetch = fetchImpl;
     this.role = role;
+    this.sharing = sharing;
     this.sent = 0;
     this.received = 0;
     this.bufferedAmount = 0;
@@ -87,12 +95,9 @@ class Mailbox extends EventEmitter {
       method, redirect: 'error', cache: 'no-store', signal,
       headers: { ...this.authHeaders, ...opts.headers }, credentials: 'omit', body: opts.body
     });
-    if (this.authHeaders['x-cc-session'] && [401,403].includes(response.status) && response.headers.get('content-type')?.includes('application/json')) {
-      const { error } = await readJSON(response).catch(() => ({}));
-      if (['account_required','account_pending','account_suspended','account_revoked'].includes(error)) {
-        this.accountError = messages[error];
-        this.terminate();
-      }
+    if (this.authHeaders['x-cc-session'] && [401,403].includes(response.status)) {
+      this.accountError = await deniedAccount(response);
+      if (this.accountError) this.terminate();
     }
     return response;
   }
@@ -128,11 +133,21 @@ class Mailbox extends EventEmitter {
     let response;
     // A lost acknowledgement may already have claimed the viewer slot. Retry
     // using the same bearer while this attempt is still owned by the viewer.
-    try { response = await this.retryRequest('POST', '', { headers: { 'x-viewer-proof': this.proof } }, this.role === 'viewer' ? 4 : 2); }
-    catch { throw new Error(this.accountError || unreachable); }
+    const headers = {'x-viewer-proof':this.proof};
+    if (this.sharing) {
+      headers['x-cc-sharing'] = CONTINUOUS;
+      if (this.sharing.viewerAccountId) headers['x-cc-viewer-account'] = this.sharing.viewerAccountId;
+    }
+    try { response = await this.retryRequest('POST', '', { headers }, this.role === 'viewer' ? 4 : 2); }
+    catch { throw Object.assign(new Error(this.accountError || unreachable),{fatal:!!this.accountError}); }
     await response.body?.cancel();
-    if (response.status !== 201 && response.status !== 200) throw new Error(this.accountError || registrationFailure(response, this.role));
+    if (response.status !== 201 && response.status !== 200) {
+      throw Object.assign(new Error(this.accountError || registrationFailure(response,this.role)),{status:response.status,fatal:!!this.accountError});
+    }
     this.registered = true;
+    if (this.sharing && response.headers.get('x-cc-sharing') !== CONTINUOUS) {
+      throw Object.assign(new Error('公网配对服务尚不支持持续共享，请稍后重试。'),{fatal:true});
+    }
     this.readyState = OPEN;
   }
 
@@ -164,7 +179,10 @@ class Mailbox extends EventEmitter {
         const response = await this.retryRequest('GET', '/messages/' + (this.received + 1), { whilePairing: true });
         if (this.readyState !== OPEN) { await response.body?.cancel(); break; }
         if (response.status === 204) {
-          const idle = this.active ? 3500 : !this.received && this.role === 'host' ? 1400 : 500;
+          // Continuous hosts can wait all day. Keep the initial handshake
+          // responsive, then back off while no encrypted packet has arrived.
+          const waitingHost = !this.received && this.role === 'host';
+          const idle = this.active ? 3500 : waitingHost ? (this.sharing ? 4000 : 1400) : 500;
           delay = Math.min(idle, delay + 250);
           continue;
         }
@@ -184,6 +202,12 @@ class Mailbox extends EventEmitter {
         }
         if (length > MAX_PACKET) throw new Error('Oversized signaling packet');
         if (this.readyState !== OPEN) break;
+        if (this.sharing) {
+          const id = response.headers.get('x-cc-viewer-account');
+          if (!validAccountId(id) || (this.sharing.viewerAccountId && id !== this.sharing.viewerAccountId) ||
+              (this.viewerAccountId && id !== this.viewerAccountId)) throw new Error('Invalid viewer membership');
+          this.viewerAccountId = id;
+        }
         this.received++;
         this.emit('message', Buffer.concat(chunks, length), true);
         delay = 0;
@@ -228,4 +252,4 @@ class Mailbox extends EventEmitter {
   }
 }
 
-module.exports = { Mailbox };
+module.exports = { Mailbox, validAccountId, deniedAccount };
