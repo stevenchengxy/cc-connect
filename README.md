@@ -58,7 +58,9 @@ npm ci
 npm start
 ```
 
-Mac 上运行 `npm run dist:mac` 生成 Apple Silicon 和 Intel 通用 DMG。Windows x64 上运行 `npm run dist:win` 生成 NSIS EXE 安装器。构建产物位于 `release/<版本号>/`。当前 Mac 包为本地临时签名，未经过 Apple 公证。Windows 包未进行 Authenticode 签名。
+Mac 上运行 `npm run dist:mac` 可生成临时签名的 Apple Silicon 和 Intel 通用预览 DMG。Windows x64 上运行 `npm run dist:win` 生成 NSIS EXE 安装器。构建产物位于 `release/<版本号>/`。0.4.6 的 Mac 包使用临时签名，Windows 包未进行 Authenticode 签名。
+
+生成 Developer ID 签名的通用 DMG 时，在构建 Mac 的钥匙串安装项目的 Developer ID Application 证书及其私钥，运行 `npm run dist:mac:signed`。有多个匹配身份时，用 `CSC_NAME` 指定证书的 SHA-1 指纹。打包脚本会在生成 DMG 前验证主应用、键鼠组件与系统选屏组件使用同一证书及各自固定的程序标识。后续版本请沿用项目的 Apple Developer 团队。若要同时完成 Apple 公证，可通过 `APPLE_KEYCHAIN_PROFILE` 指定已配置的 notarytool 钥匙串凭据。
 
 ## 验证
 
@@ -87,7 +89,7 @@ Windows 安装器使用固定的当前用户安装位置。后续 EXE 安装器�
 ### 发布新版本
 
 1. 更新 `package.json`、锁文件和下载页中的版本号，运行 `npm test` 与 `npm run test:desktop`。
-2. 在具备原生构建工具的对应系统运行 `npm run dist:mac` / `npm run dist:win`，汇总两个安装包到 `release/<版本号>/`。
+2. 在对应系统生成安装包。Mac 的 Developer ID 发行构建使用 `npm run dist:mac:signed`，临时签名预览使用 `npm run dist:mac`。Windows 使用 `npm run dist:win`。将产物汇总到 `release/<版本号>/`。
 3. 使用发布环境的私钥运行 `npm run release:manifest`。默认密钥位置为 `~/.config/cc-connect-release/signing-key.pem`，也可用 `CC_CONNECT_SIGNING_KEY` 指定。公钥必须与 `src/update-public-key.pem` 匹配。备份私钥；不要将它提交或上传到公开下载位置。
 4. 将安装包、`SHA256SUMS.txt` 与 `latest.json` 发布到 GitHub 对应的 `v<版本号>` Release，再将 `website/dist/`（包括生成的 `updates/latest.json`）发布到下载站点。已发布版本的安装包应保持不可变；修复请递增版本号。
 

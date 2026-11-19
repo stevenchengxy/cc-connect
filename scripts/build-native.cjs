@@ -14,6 +14,12 @@ function run(cmd, args) {
 }
 
 if (process.platform === 'darwin') {
+  const [identity = '-', ...extra] = process.argv.slice(2);
+  if (extra.length || (identity !== '-' && !/^[A-F0-9]{40}$/.test(identity))) {
+    throw new Error('Expected a signing certificate SHA-1 fingerprint.');
+  }
+  const signArgs = ['--sign', identity, '--force'];
+  if (identity !== '-') signArgs.push('--options', 'runtime', '--timestamp');
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'jianping-native-'));
   function universal(source, destination, minimum) {
     const slices = ['arm64', 'x86_64'].map(arch => {
@@ -27,7 +33,7 @@ if (process.platform === 'darwin') {
   try {
     const binary = path.join(output, 'jianping-input');
     universal('MacInput.swift', binary, '12.0');
-    run('/usr/bin/codesign', ['-s', '-', '--force', '--identifier', 'app.jianping.input', binary]);
+    run('/usr/bin/codesign', [...signArgs, '--identifier', 'app.jianping.input', binary]);
     const app = path.join(output, 'CC Connect Screen.app');
     const contents = path.join(app, 'Contents');
     fs.mkdirSync(path.join(contents, 'MacOS'), { recursive: true });
@@ -35,7 +41,7 @@ if (process.platform === 'darwin') {
     fs.copyFileSync(path.join(sources, 'MacScreen-Info.plist'), path.join(contents, 'Info.plist'));
     fs.copyFileSync(path.join(__dirname, '../build/icon.icns'), path.join(contents, 'Resources', 'icon.icns'));
     universal('MacScreen.swift', path.join(contents, 'MacOS', 'cc-connect-screen'), '12.3');
-    run('/usr/bin/codesign', ['-s', '-', '--force', app]);
+    run('/usr/bin/codesign', [...signArgs, app]);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

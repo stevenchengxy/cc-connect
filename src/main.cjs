@@ -281,13 +281,11 @@ function registerHandlers() {
   handle('account-refresh', () => account.refresh())
   handle('open-admin-console', () => adminConsole.open(window, language))
   handle('account-logout', () => account.logout())
+  handle('input-status', () => process.platform === 'darwin' ? InputBridge.macAccess(nativeOptions, false) : null)
   handle('screen-status', async () => {
-    const [{ report }, inputPermission] = await Promise.all([
-      capture.inspect(true),
-      process.platform === 'darwin' ? InputBridge.macAccess({ resourcesPath: process.resourcesPath, isPackaged: app.isPackaged }) : null
-    ])
+    const { report } = await capture.inspect(true)
     const appPath = process.platform === 'darwin' && app.isPackaged ? path.resolve(path.dirname(app.getPath('exe')), '../..') : null
-    return { ...report, inputPermission, appPath }
+    return { ...report, appPath }
   })
   handle('open-input-settings', async () => {
     if (process.platform !== 'darwin') throw new Error('control-permission')

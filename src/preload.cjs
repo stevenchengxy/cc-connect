@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld('jianping', {
   reject: call('reject'),
   screens: call('screens'),
   screenStatus: call('screen-status'),
+  inputStatus: call('input-status'),
   screenStreamReady: call('screen-stream-ready'),
   testNativeDisplay: call('test-native-display'),
   cancelNativeDisplayTest: call('cancel-native-display-test'),

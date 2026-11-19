@@ -1,6 +1,6 @@
 // A visible test window supplies an animated synthetic source. Always replace
 // the capture target here so the integration test never reads the user's desktop.
-const { app, BrowserWindow, clipboard, desktopCapturer, nativeImage, session, screen, systemPreferences, safeStorage } = require('electron')
+const { app, BrowserWindow, clipboard, desktopCapturer, nativeImage, session, screen, shell, systemPreferences, safeStorage } = require('electron')
 const path = require('node:path')
 const {EventEmitter} = require('node:events')
 const {PassThrough} = require('node:stream')
@@ -57,7 +57,7 @@ function installSyntheticPicker(ses,qa) {
 app.whenReady().then(async () => {
   const ses = session.defaultSession
   const captureQA = ses.captureQA = {screenPermission:'granted',listCalls:0,listFails:false,noDisplays:false,
-    pickerCalls:0,cancelPicker:false,inputPermission:'granted',inputStarts:0,inputEvents:[],
+    pickerCalls:0,cancelPicker:false,inputPermission:'granted',inputChecks:0,inputPrompts:0,inputSettingsOpened:0,inputStarts:0,inputEvents:[],
     nativeStarts:0,nativeStops:0,nativeActive:0,nativeFrames:0,nativeDisplayId:900001,
     cancelNativePicker:false,roomRequests:0}
   installSyntheticPicker(ses,captureQA)
@@ -99,7 +99,17 @@ app.whenReady().then(async () => {
     // No test input is injected into the operating system. The fixture
     // records the operations that reach the host's real session input gate.
     const {InputBridge} = require('../../native/bridge.cjs')
-    InputBridge.macAccess = async () => captureQA.inputPermission
+    InputBridge.macAccess = async (_options, request = false) => {
+      if (request) captureQA.inputPrompts++
+      else captureQA.inputChecks++
+      return captureQA.inputPermission
+    }
+    const openExternal = shell.openExternal.bind(shell)
+    shell.openExternal = async url => {
+      if (url !== 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility') return openExternal(url)
+      captureQA.inputSettingsOpened++
+      // Never open the operator's System Settings during an automated test.
+    }
     InputBridge.prototype.start = async display => {
       if (display.id !== 900001 || captureQA.inputPermission !== 'granted') throw Error('control-permission')
       captureQA.inputStarts++

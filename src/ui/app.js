@@ -23,6 +23,10 @@ let peerName = '';
 let pendingRequest = null;
 let legacyInvite = '';
 let settingsCheck = null;
+let lastNativeTest = null;
+let inputPermission = null;
+let inputReadId = 0;
+let settingsViewId = 0;
 let expiryTimer;
 let joinTimer;
 let quality = 'balanced';
@@ -51,7 +55,7 @@ const screenErrors = {
   'no-displays':'系统没有找到可共享的显示器。请接入或唤醒显示器，然后重新读取。'
 };
 function screenErrorMessage(code, permission) {
-  if (info.canUseNativeScreenPicker && ['preflight-denied','permission-pending','preflight-unconfirmed'].includes(code)) {
+  if (canVerifyWithPicker(code)) {
     return t(code === 'preflight-unconfirmed' ? '录屏预检未确认，系统也未列出屏幕。可以用系统选择屏幕，实际验证能否取得画面。' :
       'macOS 预检尚未确认录屏权限。可以用系统选择屏幕，或检查当前应用的录屏设置。');
   }
@@ -62,6 +66,9 @@ function screenErrorMessage(code, permission) {
 }
 function needsRecordingSettings(code) {
   return info.platform === 'darwin' && ['permission-denied','preflight-denied','permission-pending','preflight-unconfirmed'].includes(code);
+}
+function canVerifyWithPicker(code) {
+  return info.canUseNativeScreenPicker && ['preflight-denied','preflight-unconfirmed','permission-pending'].includes(code);
 }
 function label(id, key) {
   $(id).dataset.i18n = key;
@@ -397,24 +404,43 @@ $('settings-button').onclick = () => {
   $('turn-password').value = '';
   $('turn-password').placeholder = info.turnConfigured ? t('已保存') : '';
   notice('settings-notice');
+  settingsViewId++;
   settingsCheck = null;
-  renderScreenCheck();
+  inputPermission = null;
   $('settings-dialog').showModal();
+  renderScreenCheck();
+  void refreshInputPermission();
 };
-function closeSettings() { $('turn-password').value = ''; $('settings-dialog').close(); }
-$('close-settings').onclick = closeSettings;
-$('cancel-settings').onclick = closeSettings;
-$('settings-dialog').onclose = () => {
+function closeSettings() {
+  if (!$('settings-dialog').open) return;
   $('turn-password').value = '';
   if (settingsCheck?.nativeTest && settingsCheck.pending) void api.cancelNativeDisplayTest().catch(() => {});
   settingsCheck = null;
-};
+  inputReadId++;
+  $('settings-dialog').close();
+}
+$('close-settings').onclick = closeSettings;
+$('cancel-settings').onclick = closeSettings;
+$('settings-dialog').oncancel = event => { event.preventDefault(); closeSettings(); };
+async function refreshInputPermission() {
+  if (info.platform !== 'darwin' || !$('settings-dialog').open) return;
+  const id = ++inputReadId;
+  let status;
+  try { status = await api.inputStatus(); }
+  catch { status = 'unknown'; }
+  if (id !== inputReadId || !$('settings-dialog').open) return;
+  inputPermission = status;
+  renderScreenCheck();
+}
+window.addEventListener('focus',() => { void refreshInputPermission(); });
 function renderScreenCheck() {
   const check = settingsCheck;
+  const restricted = check?.errorCode === 'permission-restricted';
+  const usePicker = canVerifyWithPicker(check?.errorCode) && !check?.nativeResult?.width;
   $('screen-check').disabled = !!check?.pending;
-  $('settings-native-display').hidden = phase !== 'idle' || !info.canUseNativeScreenPicker ||
-    check?.errorCode === 'permission-restricted';
+  $('settings-native-display').hidden = phase !== 'idle' || !info.canUseNativeScreenPicker || restricted;
   $('settings-native-display').disabled = !!check?.pending;
+  $('settings-native-display').className = usePicker && !lastNativeTest?.width ? 'primary' : 'text-action';
   label('screen-check', check && !check.pending ? '重新读取' : '检测屏幕');
   $('settings-screen-settings').hidden = !needsRecordingSettings(check?.errorCode);
   const inputMessages = {
@@ -422,19 +448,34 @@ function renderScreenCheck() {
     denied:'键鼠控制需要辅助功能授权。如果 macOS 要求管理员确认，请联系这台 Mac 的管理员。',
     unknown:'无法检查键鼠组件，请确认已完整安装 CC Connect。'
   };
-  const inputMessage = inputMessages[check?.inputPermission];
+  const inputMessage = inputMessages[inputPermission];
   $('input-check-result').textContent = inputMessage ? t(inputMessage) : '';
   $('input-check-result').hidden = !inputMessage;
-  $('settings-input-settings').hidden = check?.inputPermission !== 'denied';
-  const showPath = check?.appPath && (needsRecordingSettings(check?.errorCode) || check?.inputPermission === 'denied');
+  $('settings-input-settings').hidden = inputPermission !== 'denied';
+  const showPath = check?.appPath && (needsRecordingSettings(check?.errorCode) || inputPermission === 'denied');
   $('checked-app-path').hidden = !showPath;
   $('checked-app-path').textContent = showPath ? t('当前运行的应用：{path}', {path:check.appPath}) : '';
+  const history = $('screen-native-history');
+  history.hidden = !lastNativeTest || restricted || check?.nativeResult === lastNativeTest;
+  if (!history.hidden) {
+    const time = new Date(lastNativeTest.at).toLocaleString(i18n.getLanguage(),{
+      month:'short',day:'numeric',hour:'numeric',minute:'2-digit'
+    });
+    history.textContent = t(lastNativeTest.width ? '上次本地检测取得 {width} × {height} 画面（{time}）。' :
+      '上次本地检测未取得画面（{time}）。',{...lastNativeTest,time});
+  }
   if (!check) return notice('screen-check-result');
+  if (restricted) return notice('screen-check-result',screenErrorMessage(check.errorCode),true);
   if (check.pending) return notice('screen-check-result', check.nativeTest ? '请在 macOS 中选一块屏幕以验证画面。' : '正在读取屏幕…');
   if (check.nativeResult) {
     if (check.nativeResult.width) return notice('screen-check-result',
       t('已取得 {width} × {height} 画面。本地检测已结束。',check.nativeResult));
     return notice('screen-check-result',check.nativeResult.message,check.nativeResult.error);
+  }
+  if (usePicker) {
+    const nextStep = phase !== 'idle' ? '预检未确认。结束当前配对或连接后可进行本地检测。' :
+      lastNativeTest?.width ? '预检未确认。共享时可用系统选择屏幕。' : '预检未确认。请选择一块屏幕进行本地检测。';
+    return notice('screen-check-result',nextStep);
   }
   if (check.errorCode) return notice('screen-check-result', screenErrorMessage(check.errorCode,check.permission), true);
   const message = info.canUseNativeScreenPicker ? '已列出 {count} 块屏幕。点「用系统选择屏幕」可验证画面。' : ['denied','not-determined'].includes(check.permission)
@@ -446,10 +487,12 @@ $('screen-check').onclick = async () => {
   if (settingsCheck?.pending) return;
   const check = settingsCheck = {pending:true};
   renderScreenCheck();
+  void refreshInputPermission();
   try {
     const result = await api.screenStatus();
     if (settingsCheck !== check || !$('settings-dialog').open) return;
     settingsCheck = result;
+    if (result.errorCode === 'permission-restricted') lastNativeTest = null;
   } catch {
     if (settingsCheck !== check || !$('settings-dialog').open) return;
     settingsCheck = {errorCode:'source-unavailable'};
@@ -463,13 +506,15 @@ $('settings-native-display').onclick = async () => {
   try {
     const {width,height} = await api.testNativeDisplay();
     if (settingsCheck !== check || !$('settings-dialog').open) return;
-    check.nativeResult = {width,height};
+    lastNativeTest = check.nativeResult = {width,height,at:Date.now()};
     check.errorCode = null;
   } catch (e) {
     if (settingsCheck !== check || !$('settings-dialog').open) return;
     const code = describeError(e);
     if (['permission-denied','permission-restricted'].includes(code)) check.errorCode = code;
-    check.nativeResult = {message:nativePickerError(code),error:code !== 'native-picker-cancelled'};
+    check.nativeResult = {message:nativePickerError(code),error:code !== 'native-picker-cancelled',at:Date.now()};
+    if (code === 'permission-restricted') lastNativeTest = null;
+    else if (code !== 'native-picker-cancelled') lastNativeTest = check.nativeResult;
   } finally {
     if (settingsCheck === check) {
       check.pending = false;
@@ -492,10 +537,15 @@ $('settings-screen-settings').onclick = () => openRecordingSettings('screen-chec
 $('consent-screen-settings').onclick = () => openRecordingSettings('consent-notice');
 $('session-screen-settings').onclick = () => openRecordingSettings('session-notice');
 async function openInputSettings(noticeId) {
-  try { await api.openInputSettings(); }
-  catch { notice(noticeId,'无法打开辅助功能设置。',true); }
+  const viewId = settingsViewId;
+  const settings = noticeId === 'input-check-result';
+  const visible = () => settings ? $('settings-dialog').open && viewId === settingsViewId : $('consent').open;
+  try {
+    await api.openInputSettings();
+    if (settings && visible() && document.hasFocus()) void refreshInputPermission();
+  } catch { if (visible()) notice(noticeId,'无法打开辅助功能设置。',true); }
 }
-$('settings-input-settings').onclick = () => openInputSettings('screen-check-result');
+$('settings-input-settings').onclick = () => openInputSettings('input-check-result');
 $('consent-input-settings').onclick = () => openInputSettings('consent-notice');
 $('settings-form').onsubmit = async (event) => {
   event.preventDefault();
@@ -530,7 +580,7 @@ function showSourceFailure(code) {
   $('use-system-picker').className = 'primary';
   label('use-system-picker',nativePicker ? '用系统选择屏幕' : '选择画面 · 仅观看');
   $('accept').hidden = offerPicker;
-  notice('consent-notice',screenErrorMessage(code),true);
+  notice('consent-notice',screenErrorMessage(code),!canVerifyWithPicker(code));
 }
 async function readConsentScreens(retry = false) {
   const request = pendingRequest;

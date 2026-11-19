@@ -169,11 +169,14 @@
       <div class="settings-row"><span data-i18n="屏幕共享">屏幕共享</span><button type="button" id="screen-check" class="text-action" aria-controls="screen-check-result" data-i18n="检测屏幕">检测屏幕</button></div>
     </div>
     <p id="screen-check-result" class="notice" role="status" hidden></p>
-    <button type="button" id="settings-native-display" class="text-action" data-i18n="用系统选择屏幕" hidden>用系统选择屏幕</button>
+    <p id="screen-native-history" class="micro" hidden></p>
+    <div class="screen-recovery">
+      <button type="button" id="settings-native-display" class="text-action" aria-controls="screen-check-result" data-i18n="用系统选择屏幕" hidden>用系统选择屏幕</button>
+      <button type="button" id="settings-screen-settings" class="text-button" data-i18n="打开录屏设置" hidden>打开录屏设置</button>
+    </div>
     <p id="input-check-result" class="micro" role="status" hidden></p>
-    <p id="checked-app-path" class="micro" hidden></p>
-    <button type="button" id="settings-screen-settings" class="text-button" data-i18n="打开录屏设置" hidden>打开录屏设置</button>
     <button type="button" id="settings-input-settings" class="text-button" data-i18n="打开辅助功能设置" hidden>打开辅助功能设置</button>
+    <p id="checked-app-path" class="micro" hidden></p>
     <button type="button" id="settings-end" class="danger" data-i18n="结束连接" hidden>结束连接</button>
     <details id="advanced-settings" hidden><summary data-i18n="自定义中继">自定义中继</summary>
     <form id="settings-form">
