@@ -32,6 +32,13 @@ async function startAccountFixture(relay) {
   await new Promise(resolve => server.listen(0,'127.0.0.1',resolve))
   return {
     origin:'http://127.0.0.1:' + server.address().port,
+    async waitForHostSlot() {
+      // This suite creates more than a minute's allowance from its single loopback IP.
+      // Run the actual admission policy, spacing test rooms just as a client must.
+      const now = Date.now()
+      const room = env.handle.prepare('SELECT created FROM rooms WHERE created>? ORDER BY created DESC LIMIT 1 OFFSET 11').get(now - 60_000)
+      if (room) await new Promise(resolve => setTimeout(resolve, room.created + 60_050 - now))
+    },
     async invite() { return (await (await call('POST','admin/invites',undefined,owner)).json()).invite },
     async setStatus(username,status) {
       const {accounts} = await (await call('GET','admin/accounts',undefined,owner)).json()

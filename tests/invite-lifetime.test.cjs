@@ -60,6 +60,17 @@ test('a verified request near expiry keeps its separate consent deadline', async
   } finally { network.stop(); }
 });
 
+test('a queued proof arriving at the deadline cannot claim a one-use invitation', () => {
+  const network = new PairingNetwork();
+  const events = [];
+  network.on('event', event => events.push(event));
+  const state = network.begin('host', 'Host', Buffer.alloc(32));
+  state.inviteExpiresAt = Date.now();
+  network.receive(state, {phase:'proof',challenge:'verified'}, {op:'proof',value:'verified'});
+  assert.equal(network.state, null);
+  assert.deepEqual(events, [{type:'closed',reason:'邀请已过期。'}]);
+});
+
 test('refusing while offline stops stalled packet delivery and polling after the rejection drain', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   let deletes = 0, aborted = 0;

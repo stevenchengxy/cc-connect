@@ -14,6 +14,8 @@
   <script defer src="custom-select.js"></script>
   <script defer src="file-channel.js"></script>
   <script defer src="native-display-video.js"></script>
+  <script defer src="remote-input.js"></script>
+  <script defer src="video-budget.js"></script>
   <script defer src="app.js"></script>
 </head>
 <body>
@@ -101,16 +103,20 @@
         </div>
         <div id="host-panel" role="tabpanel" aria-labelledby="host-tab" hidden>
           <h2 class="field-title" data-i18n="本机的配对码">本机的配对码</h2>
+          <p class="field-help" id="host-scope"></p>
           <p class="field-help" id="host-help" hidden></p>
           <div class="host-entry">
             <div id="invite-box" hidden><input id="host-invite" readonly aria-label="本机配对码" data-i18n-aria-label="本机配对码"><button id="copy-button" type="button" class="icon-button" title="复制配对码" data-i18n-title="复制配对码" aria-label="复制配对码" data-i18n-aria-label="复制配对码"><svg class="copy-idle" aria-hidden="true"><use href="#i-copy"/></svg><svg class="copy-done" aria-hidden="true"><use href="#i-confirm"/></svg></button></div>
-            <button class="primary" id="host-button" type="button"><span data-i18n="生成配对码">生成配对码</span><span class="action-glyph" aria-hidden="true"><svg><use href="#i-arrow"/></svg></span></button>
+            <button class="primary" id="host-button" type="button"><span data-i18n="授权并生成配对码">授权并生成配对码</span><span class="action-glyph" aria-hidden="true"><svg><use href="#i-arrow"/></svg></span></button>
+            <button class="secondary" id="host-files" type="button" data-i18n="仅传文件">仅传文件</button>
             <button class="secondary" id="cancel-host" type="button" hidden data-i18n="取消邀请">取消邀请</button>
           </div>
+          <button class="text-button" id="host-options" type="button" hidden data-i18n="更改共享选项">更改共享选项</button>
+          <button class="text-button" id="host-review" type="button" data-i18n="连接时再确认">连接时再确认</button>
           <button class="text-button" id="copy-legacy" type="button" data-i18n="为旧版复制兼容码" hidden>为旧版复制兼容码</button>
           <span id="copy-feedback" class="sr-only" role="status"></span>
         </div>
-        <div id="waiting" hidden><span role="status" data-i18n="等待对方确认…">等待对方确认…</span><button class="text-button" id="cancel-join" type="button" data-i18n="取消">取消</button></div>
+        <div id="waiting" hidden><span role="status" data-i18n="正在连接共享端…">正在连接共享端…</span><button class="text-button" id="cancel-join" type="button" data-i18n="取消">取消</button></div>
         <p class="notice" id="home-notice" role="status" hidden></p>
       </div>
 

@@ -74,11 +74,12 @@ class FrameReader {
 // Each instance belongs to one local gesture and one picker. Reading is paced
 // by renderer acknowledgements, so a slow decoder never builds an IPC queue.
 class NativeScreenCapture extends EventEmitter {
-  constructor({ isPackaged, resourcesPath, spawnProcess = spawn, isRestricted = () => false }) {
+  constructor({ isPackaged, resourcesPath, showCursor = true, spawnProcess = spawn, isRestricted = () => false }) {
     super()
     this.executable = helperExecutable({ isPackaged, resourcesPath })
     this.spawnProcess = spawnProcess
     this.isRestricted = isRestricted
+    this.showCursor = showCursor
     this.closed = false
     this.credit = false
     this.latest = null
@@ -112,7 +113,9 @@ class NativeScreenCapture extends EventEmitter {
       this.timer.unref()
       let child
       try {
-        this.child = child = this.spawnProcess(this.executable, ['--pick-display'], { stdio: ['pipe', 'pipe', 'ignore'] })
+        const args = ['--pick-display']
+        if (!this.showCursor) args.push('--omit-cursor')
+        this.child = child = this.spawnProcess(this.executable, args, { stdio: ['pipe', 'pipe', 'ignore'] })
       } catch {
         this.stop('native-picker-failed')
         return
@@ -149,6 +152,12 @@ class NativeScreenCapture extends EventEmitter {
     this.latest = null
     this.credit = false
     this.emit('frame', frame)
+  }
+
+  restoreViewOnlyCursor() {
+    if (this.closed || this.showCursor || !this.child?.stdin.writable) return
+    this.showCursor = true
+    this.child.stdin.write(Buffer.from([1]))
   }
 
   stop(reason = 'native-picker-cancelled') {

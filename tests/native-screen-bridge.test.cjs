@@ -21,20 +21,34 @@ function record(marker, id = 72, width = 160, height = 90) {
   return Buffer.concat([header(id, width, height), Buffer.from([255, 216, marker, 0, 255, 217])])
 }
 
-function fixture(isRestricted) {
+function fixture(isRestricted, showCursor = true) {
   const child = new EventEmitter()
   child.stdout = new PassThrough()
   child.stdin = new PassThrough()
   child.kill = () => { setImmediate(() => child.emit('exit', null)); return true }
-  const capture = new NativeScreenCapture({ isPackaged: true, resourcesPath: '/bundle/Resources', isRestricted,
+  const capture = new NativeScreenCapture({ isPackaged: true, resourcesPath: '/bundle/Resources', isRestricted, showCursor,
     spawnProcess(file, args, { stdio }) {
       assert.equal(file, path.join('/bundle/Resources', 'native/bin/CC Connect Screen.app/Contents/MacOS/cc-connect-screen'))
-      assert.deepEqual(args, ['--pick-display'])
+      assert.deepEqual(args, showCursor ? ['--pick-display'] : ['--pick-display','--omit-cursor'])
       assert.deepEqual(stdio, ['pipe', 'pipe', 'ignore'])
       return child
     } })
   return { child, capture }
 }
+
+test('controlled native capture omits the video pointer and restores it once on downgrade', async () => {
+  const { child, capture } = fixture(undefined, false)
+  const selected = capture.start()
+  child.stdout.write(record(1))
+  await selected
+  const commands = []
+  child.stdin.on('data', bytes => commands.push(...bytes))
+  capture.restoreViewOnlyCursor()
+  capture.restoreViewOnlyCursor()
+  capture.stop()
+  capture.restoreViewOnlyCursor()
+  assert.deepEqual(commands, [1])
+})
 
 test('only macOS 15.2 and later offers the picker with display identity', () => {
   for (const version of ['15.2', '15.10.1', '26.0', '26']) assert.equal(supportsNativePicker('darwin', version), true)

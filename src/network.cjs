@@ -243,6 +243,7 @@ class PairingNetwork extends EventEmitter {
         this.live(s);
       }
       const spec = { key: b64(s.secret), exp: Date.now() + LIFETIME };
+      s.inviteExpiresAt = spec.exp;
       if (this.accountOnly) {
         spec.account = 1;
         spec.managed = 1;
@@ -402,6 +403,9 @@ class PairingNetwork extends EventEmitter {
       return;
     }
     if (s.role === 'host' && !s.peer && p.phase === 'proof' && msg.op === 'proof' && msg.value === p.challenge) {
+      // A queued packet can run before a delayed timer after sleep or a
+      // stalled event loop. Enforce the displayed deadline at claim time.
+      if (Date.now() >= s.inviteExpiresAt) return this.end(s, '邀请已过期。');
       s.peer = p;
       // The authenticated viewer has claimed the invitation. Local approval
       // now has its own deadline, even when pairing began close to expiry.

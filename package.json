@@ -1,6 +1,6 @@
 {
   "name": "cc-connect",
-  "version": "0.4.7",
+  "version": "0.4.8",
   "description": "CC Connect remote desktop",
   "author": "CC Connect",
   "private": true,
@@ -57,7 +57,7 @@
       ],
       "extendInfo": {
         "NSLocalNetworkUsageDescription": "CC Connect uses your local network to pair with a computer you invite.",
-        "NSScreenCaptureUsageDescription": "CC Connect shares the selected display after you approve the connection.",
+        "NSScreenCaptureUsageDescription": "CC Connect captures the display you choose and shares it with the device you authorize.",
         "CFBundleLocalizations": [
           "en",
           "zh-Hans",

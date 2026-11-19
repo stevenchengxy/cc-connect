@@ -172,6 +172,13 @@
   max-height: min(65vw, 790px);
 }
 #session[data-mode="screen"] :is(.session-head,.session-footer,#file-tools,#session-notice) { flex: 0 0 auto; }
+#viewer-stage { display: grid; place-items: center; container-type: size; }
+/* Keep letterboxing outside the input surface in both windowed and fullscreen mode. */
+#remote-video[data-has-frame] {
+  width: min(100cqw, calc(100cqh * var(--frame-aspect)));
+  height: min(100cqh, calc(100cqw / var(--frame-aspect)));
+}
+#remote-video[data-has-frame][data-embedded-pointer] { cursor: none; }
 #session[data-mode="screen"] .session-footer { min-height: 32px; }
 #session[data-mode="screen"] #file-tools {
   grid-template-columns: auto minmax(0,1fr) auto;

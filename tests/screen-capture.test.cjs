@@ -94,7 +94,8 @@ test('approval uses the enumerated source and matches the current display only i
   const display = { id: 24, label: 'Main' }
   const unknown = { id: 'screen:2:0', display_id: '', name: 'Unmapped' }
   const choices = new ScreenChoices([source, unknown], [display], 24, 12)
-  assert.deepEqual(choices.options[0], { id: source.id, name: 'Main', primary: true })
+  assert.deepEqual(choices.options[0], { id: source.id, displayId:'24', name: 'Main', primary: true })
+  assert.equal(choices.options[1].displayId, '')
   const currentDisplay = { ...display, bounds: { x: 0, y: 0, width: 1920, height: 1080 } }
   assert.deepEqual(choices.select(source.id, [currentDisplay], 12), { source, display: currentDisplay })
   assert.deepEqual(choices.select(unknown.id, [currentDisplay], 12), { source: unknown, display: undefined })

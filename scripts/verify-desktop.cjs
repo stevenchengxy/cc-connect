@@ -111,7 +111,7 @@ async function run() {
         const password = wan ? process.env['CC_QA_' + name.toUpperCase() + '_PASSWORD'] : require('node:crypto').randomBytes(24).toString('base64url')
         if (!username || !password) throw new Error('Public account QA requires two explicitly provisioned QA accounts')
         const refuse = () => page.evaluate(async () => {
-          const pairing = await Promise.allSettled([window.jianping.host(),window.jianping.join('test')])
+          const pairing = await Promise.allSettled([window.jianping.host(),window.jianping.prepareHost(),window.jianping.join('test')])
           return pairing.every(run => run.status === 'rejected')
         })
         assert(await refuse(), 'Signed-out host and join IPC must fail')
@@ -345,7 +345,8 @@ async function run() {
       throw Error('The copy action did not deliver the expected invitation to the test clipboard')
     }
     async function pair(copyCompatible = false, fileOnly = false) {
-      await host.locator('#host-button').click()
+      await fixture?.waitForHostSlot()
+      await host.locator('#host-review').click()
       await host.locator('#host-invite').waitFor({ state: 'visible' })
       const shortCode = await host.locator('#host-invite').inputValue()
       assert.match(shortCode, /^[2-9A-HJ-NP-Z]{4}-[2-9A-HJ-NP-Z]{4}-[2-9A-HJ-NP-Z]{4}$/)
@@ -437,6 +438,9 @@ async function run() {
       if (await resume.isVisible()) await resume.click()
       await waitForVideo()
       await viewer.waitForFunction(() => document.getElementById('permission-state').textContent.includes('可控制'))
+      const hidden = await viewer.locator('#remote-video').evaluate(el => getComputedStyle(el).cursor === 'none')
+      const cursorMode = await host.evaluate(() => room.stream.getVideoTracks()[0].getSettings().cursor)
+      assert.equal(hidden,['motion','always'].includes(cursorMode), 'Only suppress the viewer pointer when capture contains one')
       await viewer.locator('#remote-video').click()
       await viewer.keyboard.press('KeyK')
       await apps[0].evaluate(async ({session}) => {
@@ -481,6 +485,8 @@ async function run() {
         return [video.videoWidth,video.videoHeight,...context.getImageData(0,0,1,1).data]
       })
       assert.deepEqual(frame.slice(0,2),[640,360])
+      assert.notEqual(await viewer.locator('#remote-video').evaluate(v => getComputedStyle(v).cursor),'none',
+        'The native controlled display omits its encoded cursor and uses the responsive local pointer')
       assert(frame[2] > 160 && frame[3] < 75 && frame[4] < 75,'The viewer should decode the synthetic red JPEG')
       await host.evaluate(() => window.jianping.input('stale-room',{kind:'key',code:'KeyB',down:true}))
       await viewer.locator('#remote-video').click()
@@ -515,6 +521,152 @@ async function run() {
       assert.equal((await readCaptureQA()).nativeActive,0)
       await setCaptureQA({nativeDisplayId:900001})
       console.log('Verified native selection after failed enumeration, cancelled selection then retry, decoded 640×360 JPEGs, input after fresh frames, source shutdown and unmatched display view-only.')
+    }
+    if (localCaptureQA) {
+      await setCaptureQA({screenPermission:'granted',listFails:false,noDisplays:false,inputPermission:'granted'})
+      const hostButton = host.locator('#host-button')
+      const code = host.locator('#host-invite')
+      const stop = async () => {
+        await host.locator('#end-session').click()
+        await viewer.waitForFunction(() => document.getElementById('top-status').textContent === '待连接')
+        await hostButton.waitFor({state:'visible'})
+      }
+      const connectWithCode = async (files = false) => {
+        await code.waitFor({state:'visible'})
+        const invite = await code.inputValue()
+        await viewer.locator('#invite-input').fill(invite)
+        await viewer.locator(files ? '#join-files' : '#join-button').click()
+        return invite
+      }
+      const supportsInput = await host.evaluate(async () => (await window.jianping.info()).inputSupported)
+      await hostButton.click()
+      await host.locator('#consent[open]').waitFor()
+      assert.equal(await code.isVisible(),false)
+      assert.equal(await host.locator('#allow-control').isChecked(),false)
+      if (supportsInput) await host.locator('#allow-control').check()
+      await host.locator('#accept').click()
+      await code.waitFor({state:'visible'})
+      assert.match(await host.locator('#host-scope').innerText(),supportsInput ? /键鼠/ : /仅观看/)
+      const first = await code.inputValue()
+      await host.locator('#cancel-host').click()
+      await hostButton.waitFor({state:'visible'})
+      assert(await captureIsDenied(), 'Cancelling the prepared invite must revoke the capture grant')
+      await hostButton.click()
+      await code.waitFor({state:'visible'})
+      assert.notEqual(await code.inputValue(),first)
+      assert.equal(await host.locator('#consent').isVisible(),false, 'The same monitor should not need another selection')
+      const listed = (await readCaptureQA()).listCalls
+      const beforeConnect = await readCaptureQA()
+      const codeUsed = await connectWithCode()
+      await waitForVideo() // No host actions after publishing the code.
+      assert.equal((await readCaptureQA()).listCalls,listed)
+      assert.equal(await host.locator('#consent').isVisible(),false)
+      assert.equal(await code.inputValue(),'')
+      let throttling
+      if (process.argv.includes('--weak-network')) {
+        throttling = await host.context().newCDPSession(host)
+        await throttling.send('Network.emulateNetworkConditionsByRule', {matchedNetworkConditions:[{
+          urlPattern:'',uploadThroughput:90000,downloadThroughput:250000,latency:50,
+          packetLoss:4,packetQueueLength:30,packetReordering:true
+        }]})
+        const initial = await viewer.locator('#remote-video').evaluate(v => v.getVideoPlaybackQuality().totalVideoFrames)
+        await viewer.waitForFunction(n => document.querySelector('#remote-video').getVideoPlaybackQuality().totalVideoFrames >= n + 12, initial)
+      }
+      if (supportsInput) {
+        await viewer.waitForFunction(() => document.querySelector('#permission-state').textContent.includes('可控制'))
+        await viewer.locator('#remote-video').click()
+        await viewer.keyboard.press('KeyM')
+        await apps[0].evaluate(async ({session},offset) => {
+          for (let i=0; i<100; i++) {
+            const events = session.defaultSession.captureQA.inputEvents.slice(offset)
+            if (events.some(e => e.kind === 'button' && e.down) &&
+                events.some(e => e.kind === 'key' && e.code === 'KeyM' && !e.down)) return
+            await new Promise(resolve => setTimeout(resolve,50))
+          }
+          throw Error('An explicitly control-enabled code failed to deliver keyboard and mouse input')
+        },beforeConnect.inputEvents.length)
+      }
+      if (throttling) {
+        await throttling.send('Network.emulateNetworkConditionsByRule',{matchedNetworkConditions:[]})
+        await throttling.detach()
+        console.log('Under a simulated 720 kbps uplink, 4% packet loss and reordering, the client continued receiving frames and delivered input.')
+      }
+      await stop()
+      await viewer.locator('#invite-input').fill(codeUsed)
+      await viewer.locator('#join-button').click()
+      await viewer.locator('#home-notice.error').waitFor({state:'visible'})
+      assert.equal(await viewer.locator('#remote-video').evaluate(v => v.srcObject),null)
+
+      // A files-only invitation cannot be upgraded by the viewer's Screen button.
+      await setCaptureQA({screenPermission:'restricted',listFails:true})
+      const beforeFileCode = await readCaptureQA()
+      await host.locator('#host-files').click()
+      await connectWithCode()
+      for (const page of [host,viewer]) await page.locator('#session[data-mode="files"]').waitFor()
+      assert.equal(await viewer.locator('#remote-video').evaluate(v => v.srcObject),null)
+      assert.equal((await readCaptureQA()).listCalls,beforeFileCode.listCalls)
+      assert.equal((await readCaptureQA()).inputStarts,beforeFileCode.inputStarts)
+      await stop()
+      await setCaptureQA({screenPermission:'granted',listFails:false})
+      // Conversely, a files-only request must release an already prepared screen.
+      await hostButton.click()
+      await connectWithCode(true)
+      for (const page of [host,viewer]) await page.locator('#session[data-mode="files"]').waitFor()
+      assert.equal(await viewer.locator('#remote-video').evaluate(v => v.srcObject),null)
+      assert(await captureIsDenied())
+      await stop()
+
+      if (nativePicker) {
+        await setCaptureQA({listFails:true,cancelNativePicker:true,inputPermission:'granted'})
+        const before = await readCaptureQA()
+        await host.locator('#host-options').click()
+        await host.locator('#use-system-picker').click()
+        await waitForNotice('consent-notice','已取消选择屏幕')
+        assert.equal(await code.isVisible(),false)
+        assert.equal((await readCaptureQA()).nativeActive,0)
+        await setCaptureQA({cancelNativePicker:false})
+        await host.locator('#use-system-picker').click()
+        await code.waitFor({state:'visible'})
+        assert.equal((await readCaptureQA()).nativeActive,1)
+        const starts = (await readCaptureQA()).nativeStarts
+        await connectWithCode()
+        await waitForVideo()
+        assert.equal((await readCaptureQA()).nativeStarts,starts, 'Joining must reuse the system-selected stream')
+        assert.equal(starts,before.nativeStarts + 2)
+        await stop()
+        assert.equal((await readCaptureQA()).nativeActive,0)
+        // If macOS ends its selected source before anyone joins, the
+        // published invitation must go away along with the local capture.
+        await hostButton.click()
+        await code.waitFor({state:'visible'})
+        await apps[0].evaluate(({session}) => session.defaultSession.stopSyntheticPicker())
+        await hostButton.waitFor({state:'visible'})
+        assert.equal(await code.inputValue(),'')
+        assert.equal((await readCaptureQA()).nativeActive,0)
+        await setCaptureQA({listFails:false})
+      }
+      if (pickerSupported && !nativePicker) {
+        await setCaptureQA({screenPermission:'granted',listFails:true,cancelPicker:false})
+        await host.locator('#host-options').click()
+        await host.locator('#use-system-picker').click()
+        await code.waitFor({state:'visible'})
+        const pickerCalls = (await readCaptureQA()).pickerCalls
+        await connectWithCode()
+        await waitForVideo()
+        assert.equal((await readCaptureQA()).pickerCalls,pickerCalls)
+        assert(await host.locator('#resume-capture').isHidden())
+        await stop()
+        await setCaptureQA({listFails:false})
+      }
+      // Emit only inside this isolated Electron main process. The operator's
+      // machine never locks and the source remains the synthetic window.
+      await host.locator('#host-files').click()
+      await code.waitFor({state:'visible'})
+      await apps[0].evaluate(({powerMonitor}) => powerMonitor.emit('lock-screen'))
+      await hostButton.waitFor({state:'visible'})
+      assert.equal(await code.inputValue(),'')
+      assert(await captureIsDenied())
+      console.log('Verified saved display and control, one-time codes, cancellation, file-only permissions and code-to-video with no host interaction after publication.')
     }
     const beforeRetry = await readCaptureQA()
     if (localCaptureQA) await setCaptureQA({screenPermission:process.platform === 'darwin' ? 'denied' : 'granted',listFails:true})

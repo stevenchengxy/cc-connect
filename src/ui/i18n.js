@@ -3,6 +3,18 @@
 // Source phrases remain stable keys so native errors can use the same catalog.
 window.ccI18n = (() => {
   const messages = {
+    '授权并生成配对码': ['授權並產生配對碼', 'Authorize pairing code'],
+    '连接时再确认': ['連線時再確認', 'Ask before connecting'],
+    '更改共享选项': ['更改分享選項', 'Change sharing options'],
+    '收到请求后由你确认。': ['收到請求後由你確認。', 'You approve the incoming request.'],
+    '正在连接共享端…': ['正在連線分享端…', 'Connecting to the host…'],
+    '首位持码成员可按你选择的权限连接一次。': ['首位持碼成員可按你選擇的權限連線一次。', 'The first member with this code can connect once with the access you choose.'],
+    '首位持码成员可连接一次，仅传文件。': ['首位持碼成員可連線一次，僅傳檔案。', 'The first member with this code can connect once for file transfer.'],
+    '持码成员可连接一次 · {display} · {scope}': ['持碼成員可連線一次 · {display} · {scope}', 'One connection per code · {display} · {scope}'],
+    '系统选择的屏幕': ['系統選擇的螢幕', 'System-selected display'],
+    '授权一次连接': ['授權一次連線', 'Authorize one connection'],
+    '选屏并生成配对码': ['選擇螢幕並產生配對碼', 'Choose display and create code'],
+    '选屏并生成仅观看配对码': ['選擇螢幕並產生僅觀看配對碼', 'Choose display for view-only access'],
     '文件传输': ['檔案傳輸', 'File transfer'],
     '发送文件': ['傳送檔案', 'Send file'],
     '另存为…': ['另存為…', 'Save as…'],

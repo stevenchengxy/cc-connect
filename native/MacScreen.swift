@@ -49,6 +49,8 @@ private final class FrameWriter {
 
 @available(macOS 15.2, *)
 private final class PickedScreen: NSObject, NSApplicationDelegate, SCContentSharingPickerObserver, SCStreamDelegate {
+    private var showCursor: Bool
+    private var captureConfiguration: SCStreamConfiguration?
     private var stream: SCStream?
     private var selectedID: CGDirectDisplayID?
     private var selectedBounds = CGRect.zero
@@ -56,12 +58,27 @@ private final class PickedScreen: NSObject, NSApplicationDelegate, SCContentShar
     private let sampleQueue = DispatchQueue(label: "app.jianping.screen.samples", qos: .userInitiated)
     private var output: ScreenFrames?
 
+    init(showCursor: Bool) {
+        self.showCursor = showCursor
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Close the stream even if the parent disappears while the picker is open.
         FileHandle.standardInput.readabilityHandler = { handle in
-            if handle.availableData.isEmpty {
+            let bytes = handle.availableData
+            if bytes.isEmpty {
                 handle.readabilityHandler = nil
                 DispatchQueue.main.async { self.finish(0) }
+            } else if bytes.contains(1) {
+                // The parent downgraded control to viewing. Restore the host's
+                // pointer in the video without prompting for the display again.
+                DispatchQueue.main.async {
+                    self.showCursor = true
+                    if let config = self.captureConfiguration, let stream = self.stream {
+                        config.showsCursor = true
+                        stream.updateConfiguration(config) { _ in }
+                    }
+                }
             }
         }
         let picker = SCContentSharingPicker.shared
@@ -98,7 +115,7 @@ private final class PickedScreen: NSObject, NSApplicationDelegate, SCContentShar
             config.height = size.height
             config.minimumFrameInterval = CMTime(value: 1, timescale: 30)
             config.queueDepth = 3
-            config.showsCursor = true
+            config.showsCursor = self.showCursor
             config.capturesAudio = false
             config.pixelFormat = kCVPixelFormatType_32BGRA
             let stream = SCStream(filter: filter, configuration: config, delegate: self)
@@ -108,6 +125,7 @@ private final class PickedScreen: NSObject, NSApplicationDelegate, SCContentShar
             self.selectedID = display.displayID
             self.selectedBounds = bounds
             self.stream = stream
+            self.captureConfiguration = config
             self.output = output
             do {
                 try stream.addStreamOutput(output, type: .screen, sampleHandlerQueue: self.sampleQueue)
@@ -208,10 +226,12 @@ guard outputSize(CGSize(width: 2160, height: 3840))?.width == 1080,
       outputSize(CGSize(width: 3840, height: 2160))?.width == 1920 else { exit(1) }
 exit(FrameWriter().write(image: synthetic, display: 42, width: 160, height: 90) ? 0 : 4)
 #else
-guard CommandLine.arguments.dropFirst() == ["--pick-display"] else { exit(2) }
+let arguments = Array(CommandLine.arguments.dropFirst())
+let showCursor = arguments == ["--pick-display"]
+guard showCursor || arguments == ["--pick-display", "--omit-cursor"] else { exit(2) }
 if #available(macOS 15.2, *) {
     let app = NSApplication.shared
-    let delegate = PickedScreen()
+    let delegate = PickedScreen(showCursor: showCursor)
     app.delegate = delegate
     app.setActivationPolicy(.regular)
     withExtendedLifetime(delegate) { app.run() }

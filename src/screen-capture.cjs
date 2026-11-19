@@ -72,7 +72,7 @@ class ScreenChoices {
     this.options = sources.map((source, index) => {
       const display = displays.find(item => String(item.id) === source.display_id)
       this.matches.set(source.id, { source, displayId: display?.id })
-      return { id: source.id, name: display?.label || source.name || ('屏幕 ' + (index + 1)),
+      return { id: source.id, displayId: display ? String(display.id) : '', name: display?.label || source.name || ('屏幕 ' + (index + 1)),
         primary: display?.id === primaryId }
     })
   }

@@ -7,15 +7,15 @@ module.exports = async context => {
   const descriptions = {
     en: [
       'CC Connect uses your local network to pair with a computer you invite.',
-      'CC Connect shares the selected display after you approve the connection.'
+      'CC Connect captures the display you choose and shares it with the device you authorize.'
     ],
     'zh-Hans': [
       'CC Connect 使用本地网络与您邀请的电脑配对。',
-      'CC Connect 在您确认共享后向已配对的设备传送选定屏幕。'
+      'CC Connect 采集您选择的屏幕，并与您授权的设备共享画面。'
     ],
     'zh-Hant': [
       'CC Connect 使用區域網路與您邀請的電腦配對。',
-      'CC Connect 在您確認分享後向已配對的裝置傳送選定螢幕。'
+      'CC Connect 擷取您選擇的螢幕，並與您授權的裝置分享畫面。'
     ]
   }
   for (const [locale, [network, capture]] of Object.entries(descriptions)) {

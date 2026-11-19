@@ -240,7 +240,7 @@ async function main() {
     await page.waitForFunction(() => document.getElementById('device-name').textContent === 'Synthetic test')
     if (host) {
       await page.locator('#host-tab').click()
-      await page.locator('#host-button').click()
+      await page.locator('#host-review').click()
       stage = 'waiting for synthetic viewer'
       await page.locator('#consent[open]').waitFor({timeout:deadline})
       assert((await page.locator('#consent-title').innerText()).includes(viewerName))

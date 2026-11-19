@@ -163,6 +163,11 @@ function createSession(role, token) {
         active.phase = 'pending'
         active.fileSessions = event.fileSessions
         active.requestedFiles = event.requestedFiles
+        if (active.preparedInvite) {
+          send({type:'invite-claimed', requestId:active.requestId, name:event.name})
+          void admitPreparedPeer(active)
+          break
+        }
         window.show()
         send({ type: 'request', name: event.name, requestId: active.requestId,
           fileSessions:event.fileSessions, requestedFiles:event.requestedFiles })
@@ -203,15 +208,52 @@ function createSession(role, token) {
   return active
 }
 
-function requirePending(requestId) {
-  if (!current || current.requestId !== requestId || current.role !== 'host' || current.phase !== 'pending' ||
+function requireHostPhase(requestId, ...phases) {
+  if (!current || current.requestId !== requestId || current.role !== 'host' || !phases.includes(current.phase) ||
       current.token !== account.approvedToken) throw new Error('连接请求已失效。')
   return current
+}
+
+function discardHostScreen(active) {
+  const selection = active.nativeCapture
+  active.nativeCapture = null
+  selection?.bridge.stop()
+  active.controlRequested = false
+  active.sourceRequested = false
+  active.systemPicked = false
+  active.source = null
+  active.display = null
+  active.captureMode = null
+}
+
+async function admitPreparedPeer(active) {
+  try {
+    // PairingNetwork emitted this event only after the first peer proved
+    // possession of this invite. Recheck membership at the point of admission.
+    if (await account.requireApproved() !== active.token) throw new Error(messages.account_required)
+    requireHostPhase(active.requestId, 'pending')
+    const filesOnly = active.requestedFiles || active.captureMode === 'files'
+    if (filesOnly && !active.fileSessions) throw new Error('对方版本尚不支持仅传文件，请先更新 CC Connect。')
+    if (filesOnly && active.captureMode !== 'files') {
+      discardHostScreen(active)
+      active.captureMode = 'files'
+      send({type:'discard-prepared-screen', requestId:active.requestId})
+    }
+    if (active.captureMode === 'screen' && screenSelectionError(capture.permission(), active.listedPermission)) {
+      throw new Error('系统未允许本次录屏请求。请检查当前应用的录屏设置。')
+    }
+    if (!filesOnly && capture.permission() === 'restricted') throw new Error('系统策略限制了录屏，请联系设备管理员。')
+    active.phase = 'approving'
+    active.network.respond(true, filesOnly ? 'files' : 'screen')
+  } catch (error) {
+    if (current === active) finish(error.message, true)
+  }
 }
 
 function disableInput(active, message) {
   if (current !== active) return
   active.allowControl = false
+  active.nativeCapture?.bridge.restoreViewOnlyCursor()
   active.controlError = message || '键鼠控制不可用，本次仅共享画面。'
   active.input?.stop()
   if (active.phase === 'connected') {
@@ -349,15 +391,47 @@ function registerHandlers() {
       }
     })
   }
+  handle('prepare-host', async () => {
+    // Keep a slow membership check out of the local display-picker gesture.
+    // Publication and peer admission both verify membership with the service.
+    const active = createSession('host', account.approvedToken)
+    active.phase = 'preparing'
+    await inputDrained
+    requireHostPhase(active.requestId, 'preparing')
+    return active.requestId
+  })
+  handle('reset-host-selection', requestId => {
+    const active = requireHostPhase(requestId, 'prepared')
+    if (pickerGrant) disarmSystemPicker(pickerGrant.id)
+    discardHostScreen(active)
+    active.phase = 'preparing'
+  })
+  handle('publish-host', async requestId => {
+    const active = requireHostPhase(requestId, 'prepared')
+    if (active.captureMode === 'native-display' && !active.nativeCapture?.displayId ||
+        active.captureMode === 'screen' && !active.sourceRequested ||
+        active.captureMode === 'system-picker' && !active.systemPicked) throw new Error('未获取到屏幕画面。')
+    active.phase = 'pairing'
+    active.preparedInvite = true
+    try {
+      if (await account.requireApproved() !== active.token) throw new Error(messages.account_required)
+      requireHostPhase(requestId, 'pairing')
+      return await active.network.host({name:deviceName})
+    }
+    catch (error) {
+      if (current === active) finish(error.message, true)
+      throw error
+    }
+  })
   handle('screens', async (requestId, explicitCheck) => {
-    const active = requirePending(requestId)
+    const active = requireHostPhase(requestId, 'pending', 'preparing')
     if (active.requestedFiles) throw new Error('文件会话未获双方确认。')
     const attempt = active.listAttempt = (active.listAttempt || 0) + 1
     active.choices = null
     active.screenError = null
     const revision = displayRevision
     const { sources, report } = await capture.inspect(explicitCheck === true)
-    requirePending(requestId)
+    requireHostPhase(requestId, 'pending', 'preparing')
     if (active.listAttempt !== attempt) throw new Error('连接请求已失效。')
     active.screenError = report.errorCode || (revision !== displayRevision ? 'source-unavailable' : null)
     if (active.screenError) throw new Error(active.screenError)
@@ -365,16 +439,17 @@ function registerHandlers() {
     active.choices = new ScreenChoices(sources, screen.getAllDisplays(), screen.getPrimaryDisplay().id, revision)
     return active.choices.options
   })
-  handle('accept', async (allowControl, screenId, requestId) => {
-    const active = requirePending(requestId)
-    active.phase = 'approving'
+  const selectSharing = async (allowControl, screenId, requestId, preparing) => {
+    const active = requireHostPhase(requestId, preparing ? 'preparing' : 'pending')
+    active.phase = preparing ? 'selecting' : 'approving'
     try {
-      if (await account.requireApproved() !== active.token || current !== active) throw new Error('连接请求已失效。')
+      if (!preparing && (await account.requireApproved() !== active.token || current !== active)) throw new Error('连接请求已失效。')
       if (screenId === 'files') {
-        if (!active.fileSessions || allowControl !== false) throw new Error('文件会话未获双方确认。')
+        if ((!preparing && !active.fileSessions) || allowControl !== false) throw new Error('文件会话未获双方确认。')
         active.choices = null
         active.captureMode = 'files'
-        active.network.respond(true, 'files')
+        if (preparing) active.phase = 'prepared'
+        else active.network.respond(true, 'files')
         return
       }
       if (active.requestedFiles) throw new Error('文件会话未获双方确认。')
@@ -406,24 +481,24 @@ function registerHandlers() {
       }
       if (current !== active || active.token !== account.approvedToken) throw new Error('连接请求已失效。')
       active.controlRequested = allowControl === true
-      active.network.respond(true)
+      if (preparing) active.phase = 'prepared'
+      else active.network.respond(true)
     } catch (err) {
-      if (current === active && active.phase === 'approving') {
-        active.controlRequested = false
-        active.source = null
-        active.display = null
-        active.captureMode = null
+      if (current === active && ['approving','selecting'].includes(active.phase)) {
+        discardHostScreen(active)
         if (['source-unavailable', ...Object.values(permissionErrors)].includes(err.message)) {
           active.screenError = err.message
           active.choices = null
         }
-        active.phase = 'pending'
+        active.phase = preparing ? 'preparing' : 'pending'
       }
       throw err
     }
-  })
+  }
+  handle('select-sharing', (control, screenId, id) => selectSharing(control, screenId, id, true))
+  handle('accept', (control, screenId, id) => selectSharing(control, screenId, id, false))
   handle('reject', requestId => {
-    const active = requirePending(requestId)
+    const active = requireHostPhase(requestId, 'pending')
     active.network.respond(false)
     if (current === active) finish('已拒绝请求')
   })
@@ -480,13 +555,18 @@ function approvedHost() {
   return current?.role === 'host' && current.phase === 'connected' && current.token === account.approvedToken
 }
 
+function maySelectDisplay() {
+  return approvedHost() || (current?.role === 'host' && current.phase === 'prepared' &&
+    current.token === account.approvedToken)
+}
+
 function requireNativePicker() {
   if (!nativePickerSupported || !nativeHelperAvailable(nativeOptions)) throw new Error('native-picker-unsupported')
   if (capture.permission() === 'restricted') throw new Error('permission-restricted')
 }
 
-function createNativeCapture() {
-  return new NativeScreenCapture({ ...nativeOptions, isRestricted: () => capture.permission() === 'restricted' })
+function createNativeCapture(showCursor = true) {
+  return new NativeScreenCapture({ ...nativeOptions, showCursor, isRestricted: () => capture.permission() === 'restricted' })
 }
 
 async function testNativeDisplay() {
@@ -517,9 +597,9 @@ function nativeSelection(requestId, captureId) {
 async function pickNativeDisplay(requestId) {
   requireNativePicker()
   const active = current
-  if (!approvedHost() || active.requestId !== requestId || active.captureMode !== 'native-display' ||
+  if (!maySelectDisplay() || active.requestId !== requestId || active.captureMode !== 'native-display' ||
       active.nativeCapture || active.input || diagnosticCapture) throw new Error('连接请求已失效。')
-  const bridge = createNativeCapture()
+  const bridge = createNativeCapture(!active.controlRequested)
   const selection = active.nativeCapture = { id: randomUUID(), bridge }
   bridge.on('frame', ({ width, height, bytes }) => {
     if (current !== active || !approvedHost() || active.nativeCapture !== selection || !trusted(window?.webContents.mainFrame)) return
@@ -537,11 +617,12 @@ async function pickNativeDisplay(requestId) {
   })
   try {
     await inputDrained
-    if (bridge.closed || current !== active || !approvedHost()) throw new Error('连接请求已失效。')
+    if (bridge.closed || current !== active || !maySelectDisplay()) throw new Error('连接请求已失效。')
     const { displayId, width, height } = await bridge.start()
-    if (bridge.closed || current !== active || !approvedHost()) throw new Error('连接请求已失效。')
+    if (bridge.closed || current !== active || !maySelectDisplay()) throw new Error('连接请求已失效。')
     requireNativePicker()
     active.display = screen.getAllDisplays().find(display => display.id === displayId)
+    if (!active.display) bridge.restoreViewOnlyCursor()
     selection.displayId = displayId
     active.previousThrottling = window.webContents.getBackgroundThrottling()
     window.webContents.setBackgroundThrottling(false)
@@ -555,15 +636,16 @@ async function pickNativeDisplay(requestId) {
 
 function grantSelectedDisplay(request, callback) {
   if (trusted(request.frame) && request.videoRequested && !request.audioRequested &&
-      approvedHost() && current.captureMode === 'screen' && current.source &&
+      maySelectDisplay() && current.captureMode === 'screen' && current.source && !current.sourceRequested && !current.captureGranted &&
       !screenSelectionError(capture.permission(), current.listedPermission)) {
     current.sourceRequested = true
     callback({ video: current.source })
   } else callback(null)
 }
 
-function disarmSystemPicker(id) {
+function disarmSystemPicker(id, selected = false) {
   if (!pickerGrant || pickerGrant.id !== id) return false
+  if (current?.requestId === pickerGrant.requestId && current.phase === 'prepared') current.systemPicked = selected === true
   clearTimeout(pickerGrant.timer)
   pickerGrant = null
   session.defaultSession.setDisplayMediaRequestHandler(grantSelectedDisplay)
@@ -571,7 +653,7 @@ function disarmSystemPicker(id) {
 }
 
 function armSystemPicker(requestId) {
-  if (!approvedHost() || current.requestId !== requestId || current.captureMode !== 'system-picker' ||
+  if (!maySelectDisplay() || current.requestId !== requestId || current.captureMode !== 'system-picker' ||
       !capture.canUseSystemPicker || current.allowControl || pickerGrant) throw new Error('连接请求已失效。')
   if (capture.permission() === 'restricted') throw new Error('permission-restricted')
   const id = randomUUID()
@@ -590,7 +672,7 @@ function configurePermissions() {
   const ses = session.defaultSession
   function allowed(contents, permission, details) {
     if (contents !== window?.webContents || !trusted(contents?.mainFrame) || permission !== 'display-capture' ||
-        !details.isMainFrame || details.requestingUrl !== pageUrl || !approvedHost()) return false
+        !details.isMainFrame || details.requestingUrl !== pageUrl || !maySelectDisplay()) return false
     return current.captureMode === 'screen' ? Boolean(current.source) :
       current.captureMode === 'system-picker' && pickerGrant?.requestId === current.requestId
   }
