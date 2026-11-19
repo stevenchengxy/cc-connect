@@ -36,7 +36,14 @@ button,select,input { outline-offset: 3px; }
 :focus-visible { outline: 3px solid #5578a9; }
 button:disabled,input:disabled { cursor: default; opacity: .53; }
 button { transition: transform var(--motion-quick) var(--ease-out), opacity var(--motion-quick) var(--ease-out); }
-button:not(:disabled):active { transform: scale(.975); transition-duration: 60ms; }
+button:not(:disabled):active { transform: scale(.975); transition-duration: 65ms; }
+:is(.primary,.secondary,.text-action,.icon-button,.select-button):not(:disabled):active {
+  filter: brightness(.95);
+}
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden;
+  clip-path: inset(50%); white-space: nowrap; border: 0;
+}
 svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.65; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
 .icon-defs { position: absolute; height: 0; width: 0; overflow: hidden; }
 .topbar,.wordmark,.header-actions,.connection-state,.switcher button,.device-summary,.quality-heading label,.quality-controls,.session-actions,.session-footer,.transport-info,.dialog-head,.dialog-actions,.checkbox-row {
@@ -169,7 +176,6 @@ input:not([type="checkbox"]):focus,select:focus-visible { border-color: #637e9e;
 #join-files { display: block; margin: 6px auto 0; min-height: 32px; font-size: 13px; }
 #consent .dialog-actions { flex-wrap: wrap; }
 #cancel-join { margin-left: auto; }
-.spinner { width: 13px; height: 13px; border: 2px solid #cdd8e5; border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .notice { font-size: 13px; line-height: 1.5; color: #39526c; padding: 9px 12px; background: #e7eef7; border-radius: 10px; margin-top: 12px; overflow-wrap: anywhere; }
 .notice.error { color: #8a3039; background: #fbe8e9; }

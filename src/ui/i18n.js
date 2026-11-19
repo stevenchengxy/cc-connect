@@ -3,6 +3,7 @@
 // Source phrases remain stable keys so native errors can use the same catalog.
 window.ccI18n = (() => {
   const messages = {
+    '文件传输': ['檔案傳輸', 'File transfer'],
     '发送文件': ['傳送檔案', 'Send file'],
     '另存为…': ['另存為…', 'Save as…'],
     '文件传输进度': ['檔案傳輸進度', 'File transfer progress'],
@@ -144,6 +145,13 @@ window.ccI18n = (() => {
     '共享屏幕': ['分享螢幕', 'Screen to share'],
     '屏幕共享': ['螢幕分享', 'Screen sharing'],
     '检测屏幕': ['檢查螢幕', 'Check screens'],
+    '通用': ['一般', 'General'],
+    '共享此机的权限': ['分享這台電腦的權限', 'Sharing permissions'],
+    '屏幕画面': ['螢幕畫面', 'Display'],
+    '键盘与鼠标': ['鍵盤與滑鼠', 'Keyboard and mouse'],
+    '同意连接，随后选屏': ['同意連線，接著選擇螢幕', 'Allow, then choose a display'],
+    '同意仅观看，随后选屏': ['同意僅觀看，接著選擇螢幕', 'Allow view only, then choose a display'],
+    '在共享请求中允许键鼠控制。': ['在分享要求中允許鍵盤與滑鼠控制。', 'Allow keyboard and mouse control in the sharing request.'],
     '键鼠控制需要 macOS 辅助功能授权。只共享画面时可不勾选。': ['鍵盤滑鼠控制需要 macOS 輔助使用授權。僅分享畫面時可不勾選。', 'Keyboard and mouse control requires macOS Accessibility access. Leave it unchecked to share just the screen.'],
     '用系统选择屏幕': ['用系統選擇螢幕', 'Choose a display with macOS'],
     '预检未确认。请选择一块屏幕进行本地检测。': ['預檢尚未確認。請選擇一個螢幕進行本機檢測。', 'The preflight check was inconclusive. Choose a display to test it locally.'],

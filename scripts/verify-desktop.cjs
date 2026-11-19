@@ -351,8 +351,12 @@ async function run() {
       assert.match(shortCode, /^[2-9A-HJ-NP-Z]{4}-[2-9A-HJ-NP-Z]{4}-[2-9A-HJ-NP-Z]{4}$/)
       let invite = shortCode
       if (copyCompatible) {
-        await host.locator('#copy-button').click()
+        const invitationNotice = await host.locator('#home-notice').textContent()
+        await host.locator('#copy-button').press('Enter')
         await readCopiedCode(value => value === shortCode)
+        await host.waitForFunction(() => document.getElementById('copy-button').classList.contains('copied'))
+        assert.match(await host.locator('#copy-feedback').textContent(), /已复制/)
+        assert.equal(await host.locator('#home-notice').textContent(), invitationNotice)
         await host.getByRole('button', {name:/旧版|兼容/}).click()
         invite = await readCopiedCode(value => value.startsWith('RD1.'))
         const legacy = JSON.parse(Buffer.from(invite.slice(4), 'base64url'))
@@ -363,6 +367,9 @@ async function run() {
       await viewer.locator('#invite-input').fill(invite)
       await viewer.locator(fileOnly ? '#join-files' : '#join-button').click()
       await host.locator('#consent[open]').waitFor()
+      assert.equal(await viewer.locator(fileOnly ? '#join-files' : '#join-button').getAttribute('aria-busy'), 'true')
+      assert.equal(await viewer.locator(fileOnly ? '#join-button' : '#join-files').getAttribute('aria-busy'), 'false')
+      assert.equal(await host.locator('#copy-feedback').textContent(), '')
       assert.equal(await host.locator('#host-invite').isVisible(), false, 'A claimed code must no longer be offered for copying')
       assert.equal(await viewer.locator('#invite-input').inputValue(), '', 'A claimed code must not be reused on reconnection')
       assert.equal(await host.locator('#allow-control').isChecked(), false)

@@ -1,0 +1,114 @@
+#settings-dialog, #consent {
+  width: min(488px, calc(100vw - 32px));
+  padding: 22px;
+  border: 1px solid rgb(255 255 255 / 90%);
+  border-radius: 20px;
+  background: #f4f5f8;
+  color: #1c2735;
+  box-shadow: 0 18px 64px rgb(28 39 59 / 22%), 0 0 0 1px rgb(31 44 64 / 7%);
+}
+
+#settings-dialog .dialog-head { margin-bottom: 15px; }
+#settings-dialog h2 { font-size: 23px; }
+#settings-dialog #close-settings {
+  width: 30px;
+  height: 30px;
+  border: 1px solid #dce0e6;
+  background: #fff;
+  box-shadow: none;
+}
+
+.preference-section + .preference-section { margin-top: 15px; }
+.preference-section h3 {
+  margin: 0 0 6px 3px;
+  color: #546171;
+  font-size: 12px;
+  font-weight: 620;
+  line-height: 1.4;
+}
+#settings-dialog .settings-list, #consent-screen-options {
+  border: 1px solid #d9dfe6;
+  border-radius: 13px;
+  background: #fff;
+}
+#settings-dialog .settings-row, .permission-item { padding: 9px 13px; }
+#settings-dialog .settings-row {
+  min-height: 41px;
+  font-size: 13px;
+}
+#settings-dialog .settings-row + .settings-row,
+.permission-item + .permission-item,
+.consent-option + .consent-option { border-top: 1px solid #e3e6eb; }
+#settings-dialog .settings-row:first-child { border-radius: 12px 12px 0 0; }
+#settings-dialog .settings-row:last-child { border-radius: 0 0 12px 12px; }
+#settings-dialog #settings-identity { margin-top: 2px; }
+.permission-line, .permission-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.permission-line { justify-content: space-between; gap: 10px; }
+.permission-actions { flex-wrap: wrap; justify-content: flex-end; }
+.permission-line h4 {
+  flex: 0 0 auto;
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+#settings-dialog .text-action, #settings-dialog #settings-native-display.primary {
+  min-height: 28px;
+  padding: 4px 9px;
+  border-radius: 7px;
+  font-size: 12px;
+}
+#settings-dialog .text-action { color: #33465c; background: #eef1f5; }
+#settings-dialog .text-action:hover:not(:disabled) { background: #e2e8ee; }
+#settings-dialog .text-button { padding: 3px 0; font-size: 12px; }
+.permission-item .notice { margin: 7px 0 0; }
+.permission-item #input-check-result, .permission-item #screen-native-history { margin: 4px 0 0; }
+#settings-dialog #checked-app-path { margin: 5px 3px 0; overflow-wrap: anywhere; }
+#settings-dialog #advanced-settings { margin-top: 10px; }
+
+#consent .consent-heading { display: flex; align-items: center; gap: 12px; }
+#consent:has(#use-system-picker.secondary:not([hidden])) { width: min(540px, calc(100vw - 32px)); }
+#consent:has(#consent-screen-options[hidden]) { width: min(426px, calc(100vw - 32px)); }
+#consent .dialog-icon {
+  width: 42px;
+  height: 42px;
+  margin: 0;
+  border-radius: 12px;
+  background: #e7ebf3;
+  color: #465e78;
+  box-shadow: none;
+}
+#consent .consent-heading h2 { font-size: 21px; line-height: 1.3; }
+#consent-screen-options { margin-top: 18px; }
+.consent-option { padding: 10px 13px; }
+#consent .field-label { margin: 0 0 6px; }
+#consent .checkbox-row { margin: 0; }
+#consent #control-note { margin: 4px 0 0 24px; }
+#consent .dialog-actions { gap: 7px; margin-top: 16px; }
+#consent .dialog-actions button { min-height: 34px; padding: 6px 12px; font-size: 13px; }
+#consent #reject { margin-right: auto; }
+#consent:has(#consent-screen-options[hidden]) #reject { margin-right: 0; }
+
+@media (max-height: 600px) {
+  #settings-dialog, #consent { padding: 16px 18px; }
+  #settings-dialog .dialog-head { margin-bottom: 9px; }
+  .preference-section + .preference-section { margin-top: 10px; }
+  #settings-dialog .settings-row, .permission-item { padding: 7px 11px; }
+  #settings-dialog .account-row > span { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px; }
+  #settings-dialog #settings-identity { margin: 0; }
+}
+
+@media (max-width: 460px) {
+  .permission-line { flex-wrap: wrap; }
+  .permission-actions { justify-content: flex-start; }
+}
+
+@media (prefers-contrast: more) {
+  #settings-dialog .settings-list, #consent-screen-options,
+  #settings-dialog .settings-row + .settings-row, .permission-item + .permission-item,
+  .consent-option + .consent-option { border-color: #93a0af; }
+}

@@ -29,6 +29,8 @@ let inputReadId = 0;
 let settingsViewId = 0;
 let expiryTimer;
 let joinTimer;
+let joinMode = 'screen';
+let copyFeedbackTimer;
 let quality = 'balanced';
 try {
   const saved = localStorage.getItem('jianping-quality');
@@ -120,10 +122,15 @@ function setStatus(text, state = '') {
 }
 function setMode(next) {
   mode = next;
-  $('view-tab').setAttribute('aria-selected', String(mode === 'viewer'));
-  $('host-tab').setAttribute('aria-selected', String(mode === 'host'));
-  $('view-panel').hidden = mode !== 'viewer';
-  $('host-panel').hidden = mode !== 'host';
+  const viewing = mode === 'viewer';
+  $('view-tab').setAttribute('aria-selected', String(viewing));
+  $('host-tab').setAttribute('aria-selected', String(!viewing));
+  $('view-tab').tabIndex = viewing ? 0 : -1;
+  $('host-tab').tabIndex = viewing ? -1 : 0;
+  $('view-panel').hidden = !viewing;
+  $('host-panel').hidden = viewing;
+  $('home-quality').hidden = !viewing;
+  $('sharing-permissions').hidden = viewing;
 }
 function renderAccount() {
   const approved = account.status === 'approved';
@@ -216,6 +223,10 @@ function syncHome() {
   const idle = phase === 'idle';
   const canPair = idle && account.status === 'approved';
   const inviting = phase === 'listening' || phase === 'request';
+  $('join-button').ariaBusy = String(phase === 'joining' && joinMode === 'screen');
+  $('join-files').ariaBusy = String(phase === 'joining' && joinMode === 'files');
+  $('host-button').ariaBusy = String(phase === 'opening');
+  if (phase !== 'listening') clearCopyFeedback();
   $('view-tab').disabled = !idle && mode !== 'viewer';
   $('host-tab').disabled = !idle && mode !== 'host';
   $('invite-input').disabled = !canPair;
@@ -228,6 +239,7 @@ function syncHome() {
   $('cancel-host').hidden = phase !== 'listening';
   $('waiting').hidden = phase !== 'joining';
   $('settings-button').disabled = phase === 'request';
+  $('sharing-permissions').disabled = phase === 'request';
   $('settings-end').hidden = phase !== 'session';
   $('advanced-settings').hidden = !canPair;
   $('update-button').disabled = !idle;
@@ -316,17 +328,25 @@ function terminate(value, message) {
 for (const [id, next] of [['view-tab','viewer'],['host-tab','host']]) {
   $(id).onclick = () => { if (phase === 'idle') { setMode(next); notice('home-notice'); } };
   $(id).onkeydown = (e) => {
-    if (phase !== 'idle' || !['ArrowLeft','ArrowRight'].includes(e.key)) return;
+    if (phase !== 'idle') return;
+    const arrowTarget = next === 'viewer' ? 'host-tab' : 'view-tab';
+    const target = {Home:'view-tab',End:'host-tab',ArrowLeft:arrowTarget,ArrowRight:arrowTarget}[e.key];
+    if (!target) return;
     e.preventDefault();
-    const other = $(next === 'viewer' ? 'host-tab' : 'view-tab');
-    other.click(); other.focus();
+    $(target).click();
+    $(target).focus();
   };
 }
+$('sharing-permissions').onclick = () => {
+  $('settings-button').click();
+  if ($('settings-dialog').open) $('screen-check').focus();
+};
 $('join-form').onsubmit = async (event) => {
   event.preventDefault();
   const invite = $('invite-input').value.trim();
   if (phase !== 'idle' || account.status !== 'approved' || !invite) return;
   const token = ++generation;
+  joinMode = event.submitter?.id === 'join-files' ? 'files' : 'screen';
   phase = 'joining';
   setStatus('正在配对', 'pending');
   syncHome(); notice('home-notice');
@@ -334,7 +354,7 @@ $('join-form').onsubmit = async (event) => {
     if (generation === token && phase === 'joining') void disconnect('等待时间已到，请确认对方仍在等待配对。', true);
   }, 120_000);
   try {
-    await api.join(invite,event.submitter?.id === 'join-files' ? 'files' : 'screen');
+    await api.join(invite,joinMode);
     // Registration has claimed this one-use invitation, even if the host
     // later declines or the connection closes without a video frame.
     if (generation === token && $('invite-input').value.trim() === invite) $('invite-input').value = '';
@@ -385,13 +405,32 @@ $('host-button').onclick = async () => {
 $('cancel-join').onclick = () => disconnect('已取消配对。');
 $('cancel-host').onclick = () => disconnect('邀请已取消。');
 $('end-session').onclick = () => disconnect('连接已结束。');
-async function copyInvite(value) {
+function clearCopyFeedback() {
+  clearTimeout(copyFeedbackTimer);
+  $('copy-button').classList.remove('copied');
+  $('copy-feedback').textContent = '';
+  $('copy-feedback').className = 'sr-only';
+}
+async function copyInvite(value, legacy = false) {
   if (phase !== 'listening' || !value) return;
-  try { await api.copy(value); if (phase === 'listening') notice('home-notice', '配对码已复制。'); }
-  catch (e) { notice('home-notice', describeError(e), true); }
+  const token = generation;
+  try {
+    await api.copy(value);
+    if (phase !== 'listening' || generation !== token) return;
+    clearCopyFeedback();
+    if (legacy) $('copy-feedback').className = 'micro';
+    else $('copy-button').classList.add('copied');
+    $('copy-feedback').textContent = t('配对码已复制。');
+    copyFeedbackTimer = setTimeout(clearCopyFeedback, 1700);
+  } catch (error) {
+    if (generation !== token || phase !== 'listening') return;
+    clearCopyFeedback();
+    $('copy-feedback').className = 'notice error';
+    $('copy-feedback').textContent = describeError(error);
+  }
 }
 $('copy-button').onclick = () => copyInvite($('host-invite').value);
-$('copy-legacy').onclick = () => copyInvite(legacyInvite);
+$('copy-legacy').onclick = () => copyInvite(legacyInvite,true);
 $('host-invite').onclick = (e) => e.target.select();
 
 $('settings-end').onclick = () => { closeSettings(); void disconnect(); };
@@ -448,7 +487,8 @@ function renderScreenCheck() {
     denied:'键鼠控制需要辅助功能授权。如果 macOS 要求管理员确认，请联系这台 Mac 的管理员。',
     unknown:'无法检查键鼠组件，请确认已完整安装 CC Connect。'
   };
-  const inputMessage = inputMessages[inputPermission];
+  const inputMessage = info.platform === 'darwin' ? inputMessages[inputPermission] :
+    info.inputSupported ? '在共享请求中允许键鼠控制。' : '本机仅支持观看。';
   $('input-check-result').textContent = inputMessage ? t(inputMessage) : '';
   $('input-check-result').hidden = !inputMessage;
   $('settings-input-settings').hidden = inputPermission !== 'denied';
@@ -578,7 +618,7 @@ function showSourceFailure(code) {
   const offerPicker = nativePicker || (!!info.canUseSystemPicker && Object.hasOwn(screenErrors,code) && code !== 'permission-restricted');
   $('use-system-picker').hidden = !offerPicker;
   $('use-system-picker').className = 'primary';
-  label('use-system-picker',nativePicker ? '用系统选择屏幕' : '选择画面 · 仅观看');
+  label('use-system-picker',nativePicker ? '同意连接，随后选屏' : '同意仅观看，随后选屏');
   $('accept').hidden = offerPicker;
   notice('consent-notice',screenErrorMessage(code),!canVerifyWithPicker(code));
 }
@@ -607,7 +647,7 @@ async function readConsentScreens(retry = false) {
     if (info.canUseNativeScreenPicker) {
       $('use-system-picker').hidden = false;
       $('use-system-picker').className = 'secondary';
-      label('use-system-picker','用系统选择屏幕');
+      label('use-system-picker','同意连接，随后选屏');
     }
   } catch (e) {
     if (currentRequest(request) && !request.approving) showSourceFailure(describeError(e));
@@ -632,6 +672,7 @@ async function requestConsent(event) {
   peerName = event.name || t('远端设备');
   setStatus('收到连接请求', 'pending');
   $('consent-title').textContent = t(requestedFiles ? '允许与「{name}」传输文件？' : '允许「{name}」查看屏幕？', {name:peerName});
+  $('consent-symbol').setAttribute('href',requestedFiles ? '#i-share' : '#i-display');
   $('consent-screen-options').hidden = requestedFiles;
   $('accept-files').hidden = !pendingRequest.fileSessions;
   $('accept-files').disabled = false;
@@ -797,8 +838,13 @@ function renderFiles(files) {
     if (file.displayState === displayState) return;
     file.displayState = displayState;
   }
-  $('file-tools').hidden = !files.ready && !result;
-  $('file-send').hidden = !files.ready || !!file;
+  const delivered = result?.message === '文件已保存。' || result?.message === '文件已送达。';
+  const tools = $('file-tools');
+  tools.hidden = !room.filesOnly && !files.ready && !result;
+  const state = file?.phase || (result ? (delivered ? 'success' : 'ended') : 'idle');
+  if (tools.dataset.state !== state) tools.dataset.state = state;
+  $('file-send').hidden = !!file || (!room.filesOnly && !files.ready);
+  $('file-send').disabled = !files.ready;
   $('file-transfer').hidden = !file && !result;
   $('file-transfer').dataset.phase = file?.phase || (result ? 'done' : '');
   $('file-name').textContent = file?.name || result?.name || '';
@@ -807,6 +853,7 @@ function renderFiles(files) {
   $('file-cancel').hidden = !file || ['picking','saving','confirming','committing'].includes(file.phase);
   $('file-cancel').textContent = t(file?.phase === 'incoming' ? '拒绝' : '取消');
   $('file-progress').hidden = !hasProgress;
+  $('file-percent').hidden = !hasProgress;
   if (!file) {
     $('file-status').textContent = result ? t(result.message) : '';
     return;
@@ -818,8 +865,12 @@ function renderFiles(files) {
   const formattedSize = Intl.NumberFormat(i18n.getLanguage(), {maximumFractionDigits:1});
   const size = file.size === undefined ? '' : file.size < 1024 ? file.size + ' B' :
     file.size < 1024 ** 2 ? formattedSize.format(file.size / 1024) + ' KiB' : formattedSize.format(file.size / 1024 ** 2) + ' MiB';
-  if (hasProgress) $('file-progress').value = progress;
-  $('file-status').textContent = [t(statuses[file.phase]),size,hasProgress ? progress + '%' : ''].filter(Boolean).join(' · ');
+  if (hasProgress) {
+    $('file-progress').value = progress;
+    $('file-percent').textContent = progress + '%';
+  }
+  const status = [t(statuses[file.phase]),size].filter(Boolean).join(' · ');
+  if ($('file-status').textContent !== status) $('file-status').textContent = status;
 }
 $('file-send').onclick = () => room?.files.choose();
 $('file-save').onclick = () => room?.files.accept();
