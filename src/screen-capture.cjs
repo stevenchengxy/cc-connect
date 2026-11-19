@@ -44,8 +44,8 @@ class ScreenCapture {
       // On macOS getSources already asks the system for capture access.
       // Its permission-gated result and the preflight status can disagree.
       // Keep successful enumeration distinct from a grant to start capture.
-      const confirmedMacSources = this.isMac && explicitCheck && sources.length > 0
-        && initialPermission === 'denied' && permission === 'denied'
+      const confirmedMacSources = this.isMac && explicitCheck && sources.length > 0 && permission === initialPermission
+        && (permission === 'denied' || permission === 'not-determined')
       if (permissionErrors[permission] && !confirmedMacSources) {
         sources = []
         const unconfirmed = this.isMac && explicitCheck && permission === initialPermission &&

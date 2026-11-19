@@ -199,7 +199,8 @@ function createSession(role, token) {
         if (event.mode === 'files') active.captureMode = 'files'
         if (role === 'host') showSharingIndicator()
         const accepted = { type: 'accepted', role, name: event.name, allowControl: active.allowControl,
-          shareId:active.share?.id, requestId: active.requestId, captureMode: active.captureMode || 'screen', controlRequested: active.controlRequested === true }
+          shareId:active.share?.id, requestId: active.requestId, captureMode: active.captureMode || 'screen', controlRequested: active.controlRequested === true,
+          canRetryInput:hostOptedIntoInput(active), nativeCursorEmbedded:active.nativeCapture?.bridge.showCursor }
         if (event.managedWan) {
           active.pendingSignals = []
           active.network.getManagedIceServers().then(iceServers => {
@@ -242,7 +243,7 @@ function isAccountError(message) {
 function startContinuousShare(active) {
   const {captureMode, controlRequested, listedPermission, display, nativeCapture, previousThrottling} = active
   const share = active.share = {
-    id:active.requestId, failures:0,
+    id:active.requestId, failures:0, controlOptIn:controlRequested, hadControl:false,
     selection:{captureMode, controlRequested, listedPermission, display, nativeCapture, previousThrottling}
   }
   const originalPermission = capture.permission()
@@ -255,11 +256,9 @@ function startContinuousShare(active) {
         (captureMode === 'screen' && screenSelectionError(permission, listedPermission))) {
       return finish('系统未允许本次录屏请求。请检查当前应用的录屏设置。', true)
     }
-    if (process.platform === 'darwin' && share.selection.controlRequested && display && Date.now() >= nextInputCheck) {
+    if (process.platform === 'darwin' && current.allowControl && current.input && Date.now() >= nextInputCheck) {
       nextInputCheck = Date.now() + 30_000
-      void InputBridge.macAccess(nativeOptions).then(access => {
-        if (current?.share === share && share.selection.controlRequested && access === 'denied') finish(inputPermissionMessage, true)
-      })
+      current.input.recheckAccess()
     }
   }, 2000)
   share.permissionCheck.unref()
@@ -381,19 +380,54 @@ async function admitPreparedPeer(active, viewerAccountId) {
   }
 }
 
+function hostOptedIntoInput(active) {
+  return Boolean(active?.role === 'host' && (active.share?.controlOptIn ?? active.controlRequested) && active.display &&
+    ['screen','native-display'].includes(active.captureMode))
+}
+
 function disableInput(active, message) {
   if (current !== active) return
-  if (active.share && message === 'control-permission') return finish(inputPermissionMessage, true)
-  // A failed helper must not silently regain control on the next connection.
-  // Keep only the remaining view-only grant until the host starts a new share.
-  if (active.share) active.share.selection.controlRequested = false
+  // If a working input grant is revoked, future viewers stay view-only until
+  // the local host explicitly retries. A first-time refusal can be rechecked
+  // on the next connection, under the host's original opt-in.
+  const retryOnReconnect = Boolean(active.share && !active.share.hadControl && message === 'control-permission')
+  if (active.share && !retryOnReconnect) active.share.selection.controlRequested = false
   active.allowControl = false
   active.nativeCapture?.bridge.restoreViewOnlyCursor()
   active.controlError = message || '键鼠控制不可用，本次仅共享画面。'
-  active.input?.stop()
-  if (active.phase === 'connected') {
+  if (active.input) {
+    inputDrained = Promise.all([inputDrained,active.input.stop()]).then(() => {})
+    active.input = null
+  }
+  if (active.phase === 'connected' || active.share) showSharingIndicator()
+  send({ type:'control-unavailable', shareId:active.share?.id, requestId:active.requestId,
+    inputStatus:message === 'control-permission' ? 'denied' : 'unknown', retryOnReconnect,
+    canRetry:hostOptedIntoInput(active), message:message === 'control-permission' ? inputPermissionMessage : active.controlError })
+}
+
+async function startHostInput(active) {
+  if (!hostOptedIntoInput(active) || active.input || localFiles.open) throw new Error('无法为所选显示器启用键鼠控制。')
+  const input = active.input = new InputBridge()
+  input.on('error', error => { if (active.input === input) disableInput(active,error.message) })
+  const live = () => current === active && approvedHost() && active.input === input
+  try {
+    await inputDrained
+    if (!live() || localFiles.open) throw new Error('连接请求已失效。')
+    // The process that posts events performs the final OS permission check.
+    await input.start(active.display, nativeOptions)
+    if (!live() || localFiles.open) throw new Error('连接请求已失效。')
+    active.allowControl = true
+    active.controlError = null
+    if (active.share) {
+      active.share.hadControl = true
+      active.share.selection.controlRequested = true
+    }
+    active.controlRequested = true
     showSharingIndicator()
-    send({ type: 'control-unavailable', requestId:active.requestId, message: active.controlError })
+  } catch (error) {
+    if (live()) disableInput(active,error.message)
+    else await input.stop()
+    throw error
   }
 }
 
@@ -629,17 +663,22 @@ function registerHandlers() {
         active.display = display
         active.captureMode = 'screen'
       }
+      let inputStatus
       if (allowControl === true) {
         if (!inputSupported || (active.captureMode !== 'native-display' && !active.display)) throw new Error('无法为所选显示器启用键鼠控制。')
         if (process.platform === 'darwin') {
-          const access = await InputBridge.macAccess({ resourcesPath: process.resourcesPath, isPackaged: app.isPackaged })
-          if (access === 'denied') throw new Error('control-permission')
-          if (access !== 'granted') throw new Error('无法检查键鼠组件，请确认已完整安装 CC Connect。')
+          inputStatus = await InputBridge.macAccess(nativeOptions)
+          if (!preparing && inputStatus !== 'granted') {
+            throw new Error(inputStatus === 'denied' ? 'control-permission' : '无法检查键鼠组件，请确认已完整安装 CC Connect。')
+          }
         }
       }
       if (current !== active || active.token !== account.approvedToken) throw new Error('连接请求已失效。')
       active.controlRequested = allowControl === true
-      if (preparing) active.phase = 'prepared'
+      if (preparing) {
+        active.phase = 'prepared'
+        return {inputStatus}
+      }
       else active.network.respond(true)
     } catch (err) {
       if (current === active && ['approving','selecting'].includes(active.phase)) {
@@ -682,19 +721,24 @@ function registerHandlers() {
     // Consume the selected-source grant only after the renderer obtained video.
     active.sourceRequested = false
     if (active.controlRequested && (!native || active.display)) {
-      if (active.input || !active.display) throw new Error('无法为所选显示器启用键鼠控制。')
-      active.input = new InputBridge()
-      active.input.on('error', err => disableInput(active, err.message))
-      await inputDrained
-      if (current !== active || !approvedHost()) throw new Error('连接请求已失效。')
-      await active.input.start(active.display, { resourcesPath: process.resourcesPath, isPackaged: app.isPackaged })
-      if (current !== active || !approvedHost()) { active.input.stop(); throw new Error('连接请求已失效。') }
-      if (active.controlError) throw new Error(active.controlError)
-      active.allowControl = true
-      showSharingIndicator()
+      try { await startHostInput(active) }
+      catch (error) {
+        if (current !== active || !approvedHost() || !active.share) throw error
+        // Keep the authorized video stream usable even if macOS allows only
+        // screen capture. Input remains closed until its own grant succeeds.
+      }
     }
     active.captureGranted = true
     return active.allowControl
+  })
+  handle('retry-input', async requestId => {
+    const active = current
+    if (!approvedHost() || active.requestId !== requestId || !active.captureGranted || !hostOptedIntoInput(active)) {
+      throw new Error('连接请求已失效。')
+    }
+    if (!active.allowControl) await startHostInput(active)
+    if (current !== active || !approvedHost() || !active.allowControl) throw new Error('连接请求已失效。')
+    return {allowControl:true, nativeCursorEmbedded:active.nativeCapture?.bridge.showCursor}
   })
   ipcMain.on('jianping:input', (event, requestId, data) => {
     if (localFiles.open || !trusted(event.senderFrame) || current?.role !== 'host' ||

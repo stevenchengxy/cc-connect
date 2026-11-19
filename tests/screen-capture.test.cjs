@@ -55,16 +55,19 @@ test('empty sources and managed policy have distinct results', async () => {
 })
 
 test('explicit successful system enumeration is kept when preflight is stale, without authorizing a revoked selection', async () => {
-  const capture = new ScreenCapture({ platform:'darwin', systemVersion:'26', getPermission:() => 'denied',
-    getSources:async () => [source] })
-  const checked = await capture.inspect(true)
-  assert.equal(checked.report.permission, 'denied')
-  assert.equal(checked.report.errorCode, null)
-  assert.deepEqual(checked.sources, [source])
-  assert.equal(screenSelectionError('denied', checked.report.permission), null)
+  for (const permission of ['denied','not-determined']) {
+    const capture = new ScreenCapture({ platform:'darwin', systemVersion:'26', getPermission:() => permission,
+      getSources:async () => [source] })
+    const checked = await capture.inspect(true)
+    assert.equal(checked.report.permission, permission)
+    assert.equal(checked.report.errorCode, null)
+    assert.deepEqual(checked.sources, [source])
+    assert.equal(screenSelectionError(permission, checked.report.permission), null)
+    assert.equal(screenSelectionError('restricted', checked.report.permission), 'permission-restricted')
+    assert.equal((await capture.inspect(false)).report.screenCount, 0)
+  }
   assert.equal(screenSelectionError('denied', 'granted'), 'permission-denied')
-  assert.equal(screenSelectionError('restricted', checked.report.permission), 'permission-restricted')
-  assert.equal((await capture.inspect(false)).report.errorCode, 'preflight-denied')
+  assert.equal(screenSelectionError('denied', 'not-determined'), 'permission-denied')
 })
 
 test('a persistent macOS preflight and a failed listing cannot identify a fresh user denial', async () => {

@@ -125,6 +125,14 @@ func normalizedPoint(_ x: Substring, _ y: Substring) -> CGPoint? {
 reply("READY")
 while let line = readLine() {
     if !isActiveDisplay(display) { break }
+    if line == "check-access" {
+        if !CGPreflightPostEventAccess() {
+            reply("ERROR control-permission")
+            break
+        }
+        reply("ACCESS OK")
+        continue
+    }
     let parts = line.split(separator: " ")
     guard let action = parts.first else { continue }
     switch action {

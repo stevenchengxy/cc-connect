@@ -57,7 +57,7 @@ function installSyntheticPicker(ses,qa) {
 app.whenReady().then(async () => {
   const ses = session.defaultSession
   const captureQA = ses.captureQA = {screenPermission:'granted',listCalls:0,listFails:false,noDisplays:false,
-    pickerCalls:0,cancelPicker:false,inputPermission:'granted',inputChecks:0,inputPrompts:0,inputSettingsOpened:0,inputStarts:0,inputEvents:[],
+    pickerCalls:0,cancelPicker:false,inputPermission:'granted',inputStartupPermission:null,inputChecks:0,inputPrompts:0,inputSettingsOpened:0,inputAttempts:0,inputStarts:0,inputEvents:[],
     nativeStarts:0,nativeStops:0,nativeActive:0,nativeFrames:0,nativeDisplayId:900001,
     cancelNativePicker:false,roomRequests:0}
   installSyntheticPicker(ses,captureQA)
@@ -110,9 +110,14 @@ app.whenReady().then(async () => {
       captureQA.inputSettingsOpened++
       // Never open the operator's System Settings during an automated test.
     }
-    InputBridge.prototype.start = async display => {
-      if (display.id !== 900001 || captureQA.inputPermission !== 'granted') throw Error('control-permission')
+    InputBridge.prototype.start = async function(display) {
+      captureQA.inputAttempts++
+      if (display.id !== 900001 || (captureQA.inputStartupPermission ?? captureQA.inputPermission) !== 'granted') throw Error('control-permission')
       captureQA.inputStarts++
+      ses.qaInputBridge = this
+    }
+    InputBridge.prototype.recheckAccess = function() {
+      if ((captureQA.inputStartupPermission ?? captureQA.inputPermission) !== 'granted') this.emit('error',Error('control-permission'))
     }
     InputBridge.prototype.send = data => { captureQA.inputEvents.push(data); return true }
   }

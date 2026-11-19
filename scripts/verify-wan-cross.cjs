@@ -112,6 +112,7 @@ async function main() {
     const events = []
     const requestId = require('node:crypto').randomUUID()
     let consentedControl = false
+    let screenSelected = false
     let dispatching = Promise.resolve()
     peer.on('event', event => {
       dispatching = dispatching.then(async () => {
@@ -120,9 +121,15 @@ async function main() {
           console.log('Managed pairing completed for', role, mode)
           const iceServers = await peer.getManagedIceServers()
           console.log('Managed TURN entries for', role, mode, iceServers.length)
-          await notify({type:'accepted', requestId, role, name:event.name, managedWan:true, managedIceServers:iceServers, managedIceExpiresAt:peer.managedIceExpiresAt, allowControl:host && consentedControl})
+          await notify({type:'accepted', requestId, ...(host && {shareId:requestId,captureMode:'screen'}),
+            role, name:event.name, managedWan:true, managedIceServers:iceServers, managedIceExpiresAt:peer.managedIceExpiresAt,
+            allowControl:false, controlRequested:host && consentedControl})
         } else if (event.type === 'signal') await notify({type:'signal', signal:event.payload})
-        else await notify(event.type === 'request' ? {...event,requestId} : event)
+        else if (host && event.type === 'request') {
+          assert(screenSelected && event.name === viewerName,'Only the invited synthetic viewer may use the selected QA surface')
+          await notify({type:'invite-claimed',shareId:requestId,requestId,name:event.name})
+          peer.respond(true)
+        } else await notify(event)
       }).catch(() => { events.push('signaling delivery stopped') })
     })
     const notify = event => page.evaluate(e => window.qaEvent(e), event)
@@ -136,20 +143,21 @@ async function main() {
     await page.exposeFunction('qaStop', () => peer.stop())
     if (host) {
       await page.exposeFunction('qaHost', async () => {
+        assert(screenSelected)
         const result = await peer.host({name:'CC Connect WAN synthetic canvas'})
         assert(result.internetAvailable, 'Public registration failed')
         const testCode = result.invite
         const payload = nativeWindow ? require('./windows-qa/window-bridge.cjs').sealInvite(testCode, process.env.CC_QA_VIEWER_PUBLIC_KEY) : testCode
         await fs.writeFile(inviteFile, payload, {flag:'wx', mode:0o600})
         ownsInvite = true
-        return {...result, invite:testCode}
+        return {...result, invite:testCode, shareId:requestId, requestId}
       })
       await page.exposeFunction('qaAllowCanvas', (control, screen) => {
         assert.equal(control, controlTest)
         assert.equal(screen, 'synthetic')
+        screenSelected = true
         consentedControl = control
-        peer.respond(true)
-        console.log('Synthetic host approved', mode, 'session')
+        console.log('Synthetic host authorized', mode, 'before publication')
       })
     } else {
       const invite = rawInvite.trim().startsWith('{') ? JSON.parse(rawInvite)[mode] : rawInvite.trim()
@@ -178,8 +186,9 @@ async function main() {
         info:async () => ({name:'Synthetic test',platform:'linux',version:'test',language:'en',inputSupported:host,iceServers:[],account:{status:'approved',username:'Synthetic QA'}}),
         setLanguage:async () => {}, onEvent:listener => { window.qaEvent=listener },
         signal:window.qaSignal, disconnect:window.qaStop, renewIce:window.qaRenewIce,
-        ...(host ? {host:window.qaHost,screens:async () => [{id:'synthetic',name:'Generated canvas',primary:true}],
-          accept:async (allow, screen) => { window.qaControlGranted = allow === true; await window.qaAllowCanvas(allow, screen) },
+        ...(host ? {prepareHost:async () => requestId, publishHost:window.qaHost,
+          screens:async () => [{id:'synthetic',name:'Generated canvas',primary:true}],
+          selectSharing:async (allow, screen) => { await window.qaAllowCanvas(allow,screen); window.qaControlGranted = allow === true },
           screenStreamReady:async id => id === requestId && window.qaControlGranted && window.qaCaptureTrack?.readyState === 'live'}
           : {join:window.qaJoin})
       }
@@ -240,15 +249,13 @@ async function main() {
     await page.waitForFunction(() => document.getElementById('device-name').textContent === 'Synthetic test')
     if (host) {
       await page.locator('#host-tab').click()
-      await page.locator('#host-review').click()
-      stage = 'waiting for synthetic viewer'
+      await page.locator('#host-button').click()
       await page.locator('#consent[open]').waitFor({timeout:deadline})
-      assert((await page.locator('#consent-title').innerText()).includes(viewerName))
       assert.equal(await page.locator('#allow-control').isChecked(), false)
       if (controlTest) await page.locator('#allow-control').check()
       await page.locator('#accept').click()
-      stage = 'host media negotiation'
-      await page.waitForFunction(() => document.getElementById('top-status').textContent === 'Sharing', null, {timeout:70000})
+      stage = 'waiting for synthetic viewer'
+      await page.waitForFunction(() => document.getElementById('top-status').textContent === 'Sharing', null, {timeout:deadline})
       console.log('Host', mode, 'ICE route', await selectedRoute(page))
       await page.locator('#home').waitFor({state:'visible',timeout:60000})
       const target = await page.evaluate(() => window.qaTarget)

@@ -103,7 +103,7 @@
         </div>
         <div id="host-panel" role="tabpanel" aria-labelledby="host-tab" hidden>
           <h2 class="field-title" data-i18n="本机固定配对码">本机固定配对码</h2>
-          <p class="field-help" id="host-scope"></p>
+          <p class="field-help" id="host-scope" hidden></p>
           <p class="field-help" id="host-help" hidden></p>
           <div class="host-entry">
             <div id="invite-box" hidden><input id="host-invite" readonly aria-label="本机配对码" data-i18n-aria-label="本机配对码"><button id="copy-button" type="button" class="icon-button" title="复制配对码" data-i18n-title="复制配对码" aria-label="复制配对码" data-i18n-aria-label="复制配对码"><svg class="copy-idle" aria-hidden="true"><use href="#i-copy"/></svg><svg class="copy-done" aria-hidden="true"><use href="#i-confirm"/></svg></button></div>
@@ -112,7 +112,7 @@
             <button class="secondary" id="cancel-host" type="button" hidden data-i18n="取消邀请">取消邀请</button>
           </div>
           <button class="text-button" id="host-options" type="button" hidden data-i18n="更改共享选项">更改共享选项</button>
-          <button class="text-button" id="host-review" type="button" data-i18n="连接时再确认">连接时再确认</button>
+          <button class="text-button" id="host-input-settings" type="button" data-i18n="打开辅助功能设置" hidden>打开辅助功能设置</button>
           <button class="text-button" id="copy-legacy" type="button" data-i18n="为旧版复制兼容码" hidden>为旧版复制兼容码</button>
           <span id="copy-feedback" class="sr-only" role="status"></span>
         </div>
@@ -143,7 +143,12 @@
       <div class="session-actions"><button class="icon-button" id="fullscreen" type="button" aria-label="切换全屏" data-i18n-aria-label="切换全屏" title="切换全屏" data-i18n-title="切换全屏" hidden><svg><use href="#i-expand"/></svg></button><button id="end-session" class="danger" type="button"><svg><use href="#i-stop"/></svg><span id="end-label" data-i18n="结束连接">结束连接</span></button></div>
     </div>
     <div id="viewer-stage" hidden><video id="remote-video" autoplay playsinline muted tabindex="0" aria-label="远程屏幕" data-i18n-aria-label="远程屏幕"></video><p id="video-wait" data-i18n="正在接收远程画面…">正在接收远程画面…</p></div>
-    <div id="host-stage" class="card" hidden><span class="sharing-icon"><svg><use href="#i-share"/></svg></span><h2 id="sharing-title">正在建立屏幕共享</h2><button class="primary" type="button" id="resume-capture" hidden data-i18n="开始共享">开始共享</button><button class="text-button" type="button" id="session-screen-settings" hidden data-i18n="打开录屏设置">打开录屏设置</button></div>
+    <div id="host-stage" class="card" hidden><span class="sharing-icon"><svg><use href="#i-share"/></svg></span><h2 id="sharing-title">正在建立屏幕共享</h2><button class="primary" type="button" id="resume-capture" hidden data-i18n="开始共享">开始共享</button><button class="text-button" type="button" id="session-screen-settings" hidden data-i18n="打开录屏设置">打开录屏设置</button>
+      <div class="input-recovery" id="input-recovery" hidden>
+        <button class="text-button" id="session-input-settings" type="button" data-i18n="打开辅助功能设置" hidden>打开辅助功能设置</button>
+        <button class="secondary" id="retry-input" type="button" data-i18n="启用键鼠控制">启用键鼠控制</button>
+      </div>
+    </div>
     <div class="session-footer"><span class="permission-state" id="permission-state"></span><div class="transport-info"><svg><use href="#i-lock"/></svg><span id="session-stats">正在协商加密连接…</span></div><label id="live-quality-wrap" hidden><span data-i18n="接收画质">接收画质</span> <select id="live-quality" aria-label="接收画质" data-i18n-aria-label="接收画质"><option value="smooth" data-i18n="流畅">流畅</option><option value="balanced" selected data-i18n="均衡">均衡</option><option value="detail" data-i18n="清晰">清晰</option></select></label></div>
     <section class="file-tools" id="file-tools" aria-label="文件传输" data-i18n-aria-label="文件传输" hidden>
       <div class="file-glyph" aria-hidden="true">
@@ -173,8 +178,11 @@
       </div>
       <div id="consent-screen-options">
         <div class="consent-option">
-          <label for="screens" class="field-label" data-i18n="共享屏幕">共享屏幕</label>
-          <select id="screens" required></select>
+          <div id="listed-screens">
+            <label for="screens" class="field-label" data-i18n="共享屏幕">共享屏幕</label>
+            <select id="screens" required></select>
+          </div>
+          <p class="field-label" id="picker-source" hidden data-i18n="在 macOS 窗口中选择屏幕">在 macOS 窗口中选择屏幕</p>
           <div class="screen-recovery" id="screen-recovery" hidden>
             <button type="button" id="retry-screens" class="text-action" data-i18n="重新读取">重新读取</button>
             <button type="button" id="consent-screen-settings" class="text-button" data-i18n="打开录屏设置" hidden>打开录屏设置</button>

@@ -105,6 +105,10 @@ class InputBridge extends EventEmitter {
         this.stop();
       }, 6000);
       lines.on('line', line => {
+        if (line === 'ACCESS OK') {
+          clearTimeout(session.accessTimer);
+          session.accessTimer = null;
+        }
         if (line.startsWith('ERROR ')) session.message = line.slice(6, 300);
         if (line === 'READY' && !settled && !session.stopping && this.session === session) {
           session.ready = true;
@@ -118,6 +122,7 @@ class InputBridge extends EventEmitter {
         // EPIPE races with process exit. The close handler reports the outcome.
       });
       child.once('close', () => {
+        clearTimeout(session.accessTimer);
         lines.close();
         if (this.session === session) this.session = null;
         if (!session.ready) {
@@ -144,6 +149,19 @@ class InputBridge extends EventEmitter {
     return true;
   }
 
+  recheckAccess() {
+    const session = this.session;
+    if (process.platform !== 'darwin' || !session?.ready || session.stopping || session.accessTimer || !session.child.stdin.writable) return;
+    // Only the live, event-posting process can confirm its own effective permission.
+    session.accessTimer = setTimeout(() => {
+      if (this.session !== session || session.stopping) return;
+      this.stop();
+      this.emit('error', new Error('键鼠控制暂时不可用，已切换为仅观看。'));
+    }, 4000);
+    session.accessTimer.unref();
+    session.child.stdin.write('check-access\n');
+  }
+
   stop() {
     ++this.revision;
     const session = this.session;
@@ -151,6 +169,7 @@ class InputBridge extends EventEmitter {
     this.session = null;
     session.stopping = true;
     session.ready = false;
+    clearTimeout(session.accessTimer);
     // EOF also reaches the helper if the parent is killed. Each helper releases
     // exactly its own held inputs in the EOF path, including during startup.
     session.child.stdin.end();

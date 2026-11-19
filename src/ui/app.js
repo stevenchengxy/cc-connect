@@ -234,9 +234,10 @@ function syncHome() {
   const saved = savedSharing();
   $('host-options').hidden = !canPair || !saved;
   $('host-files').hidden = !canPair;
-  $('host-review').hidden = !canPair;
-  $('host-scope').textContent = phase === 'listening' && !preparedHost ? t('收到请求后由你确认。') :
-    shareScopeText(preparedHost?.choice || saved);
+  const scope = shareScopeText(preparedHost?.choice || saved,preparedHost?.inputStatus);
+  $('host-scope').textContent = scope;
+  $('host-scope').hidden = !scope;
+  $('host-input-settings').hidden = phase !== 'listening' || !preparedHost?.choice?.control || preparedHost.inputStatus !== 'denied';
   if (phase !== 'listening') clearCopyFeedback();
   $('view-tab').disabled = !idle && mode !== 'viewer';
   $('host-tab').disabled = !idle && mode !== 'host';
@@ -431,14 +432,14 @@ function savedSharing() {
   } catch { /* Selection is optional on this device. */ }
   return null;
 }
-function shareScopeText(choice) {
-  const audience = t('首位持码的已批准成员可连接，此后仅该账号可重连，直到你停止共享。');
-  if (!choice) return audience;
+function shareScopeText(choice, inputStatus) {
+  if (!choice) return '';
   if (choice.mode === 'files') return t('本次仅允许一位持码成员传输文件。');
-  const scope = t('本次共享 · {display} · {scope}', {
-    display:choice.name || t('系统选择的屏幕'), scope:t(choice.control ? '允许键鼠控制' : '仅观看')
+  const scope = !choice.control ? '仅观看' : inputStatus === 'denied' ? '仅观看 · 键鼠待授权' :
+    inputStatus === 'unknown' ? '键鼠权限待确认' : '允许键鼠控制';
+  return t('本次共享 · {display} · {scope}', {
+    display:choice.name || t('系统选择的屏幕'), scope:t(scope)
   });
-  return scope + '\n' + audience;
 }
 function stopPreparedStream() {
   const stream = preparedHost?.stream;
@@ -489,16 +490,12 @@ function showInvite(result, token) {
   syncHome();
   if (phase === 'listening') setStatus('等待配对', 'pending');
 }
-async function openHost({manual=false, files=false, configure=false} = {}) {
+async function openHost({files=false, configure=false} = {}) {
   if (phase !== 'idle' || account.status !== 'approved') return;
   const token = ++generation;
   phase = 'opening';
   syncHome(); notice('home-notice'); setStatus('正在创建邀请', 'pending');
   try {
-    if (manual) {
-      showInvite(await api.host(), token);
-      return;
-    }
     const id = await api.prepareHost();
     if (generation !== token) return;
     preparedHost = {id, generation:token};
@@ -515,7 +512,6 @@ async function openHost({manual=false, files=false, configure=false} = {}) {
 $('host-button').onclick = () => openHost();
 $('host-files').onclick = () => openHost({files:true});
 $('host-options').onclick = () => openHost({configure:true});
-$('host-review').onclick = () => openHost({manual:true});
 $('rotate-device-code').onclick = () => {
   if (phase === 'idle' && account.status === 'approved' && !rotatingDeviceCode) $('rotate-dialog').showModal();
 };
@@ -715,7 +711,11 @@ $('session-screen-settings').onclick = () => openRecordingSettings('session-noti
 async function openInputSettings(noticeId) {
   const viewId = settingsViewId;
   const settings = noticeId === 'input-check-result';
-  const visible = () => settings ? $('settings-dialog').open && viewId === settingsViewId : $('consent').open;
+  const owner = room;
+  const draft = preparedHost;
+  const visible = () => settings ? $('settings-dialog').open && viewId === settingsViewId :
+    noticeId === 'session-notice' ? isCurrent(owner) :
+    noticeId === 'home-notice' ? draft && preparedHost === draft && phase === 'listening' : $('consent').open;
   try {
     await api.openInputSettings();
     if (settings && visible() && document.hasFocus()) void refreshInputPermission();
@@ -723,6 +723,8 @@ async function openInputSettings(noticeId) {
 }
 $('settings-input-settings').onclick = () => openInputSettings('input-check-result');
 $('consent-input-settings').onclick = () => openInputSettings('consent-notice');
+$('host-input-settings').onclick = () => openInputSettings('home-notice');
+$('session-input-settings').onclick = () => openInputSettings('session-notice');
 $('settings-form').onsubmit = async (event) => {
   event.preventDefault();
   if (phase !== 'idle' || account.status !== 'approved' || !$('advanced-settings').open) return;
@@ -745,7 +747,22 @@ function pickerButton(native) {
   if (pendingRequest?.preparing) return native ? '选屏并开启共享' : '选屏并开启仅观看共享';
   return native ? '同意连接，随后选屏' : '同意仅观看，随后选屏';
 }
+function usePickerInsteadOfList(native) {
+  $('listed-screens').hidden = true;
+  $('picker-source').hidden = false;
+  $('screens').replaceChildren();
+  $('screens').disabled = true;
+  $('allow-control').disabled = !native || !info.inputSupported;
+  if ($('allow-control').disabled) $('allow-control').checked = false;
+  $('accept').hidden = true;
+  $('accept').disabled = true;
+  $('use-system-picker').hidden = false;
+  $('use-system-picker').className = 'primary';
+  label('use-system-picker',pickerButton(native));
+  $('screen-recovery').hidden = false;
+}
 function showSourceFailure(code) {
+  if (pendingRequest) pendingRequest.matched = false;
   $('screens').replaceChildren(new Option(t('暂无可选屏幕'),''));
   $('screens').disabled = true;
   $('consent-input-settings').hidden = true;
@@ -756,16 +773,22 @@ function showSourceFailure(code) {
   $('screen-recovery').hidden = false;
   $('consent-screen-settings').hidden = !needsRecordingSettings(code);
   const offerPicker = nativePicker || (!!info.canUseSystemPicker && Object.hasOwn(screenErrors,code) && code !== 'permission-restricted');
-  $('use-system-picker').hidden = !offerPicker;
-  $('use-system-picker').className = 'primary';
-  label('use-system-picker',pickerButton(nativePicker));
-  $('accept').hidden = offerPicker;
+  if (offerPicker) usePickerInsteadOfList(nativePicker);
+  else {
+    $('listed-screens').hidden = false;
+    $('picker-source').hidden = true;
+    $('use-system-picker').hidden = true;
+    $('accept').hidden = false;
+  }
   notice('consent-notice',screenErrorMessage(code),!canVerifyWithPicker(code));
 }
 async function readConsentScreens(retry = false) {
   const request = pendingRequest;
   if (!currentRequest(request) || request.busy || request.requestedFiles || request.approving) return;
   request.busy = true;
+  request.matched = false;
+  $('listed-screens').hidden = false;
+  $('picker-source').hidden = true;
   $('retry-screens').disabled = true;
   $('screens').disabled = true;
   $('screens').replaceChildren(new Option(t('正在读取屏幕…'),''));
@@ -783,7 +806,8 @@ async function readConsentScreens(retry = false) {
       opt.dataset.displayId = screen.displayId || '';
       return opt;
     }));
-    const savedScreen = request.saved?.displayId && screens.find(screen => screen.displayId === request.saved.displayId);
+    const savedScreen = request.saved?.mode === 'screen' && request.saved.displayId &&
+      screens.find(screen => screen.displayId === request.saved.displayId);
     if (savedScreen) $('screens').value = savedScreen.id;
     request.matched = Boolean(savedScreen);
     $('screens').disabled = false;
@@ -837,22 +861,30 @@ async function requestConsent(event) {
   if (!info.inputSupported) controlNote = '本机仅支持观看。';
   else if (info.canUseNativeScreenPicker) controlNote = '键鼠控制需要 macOS 辅助功能授权。只共享画面时可不勾选。';
   else if (info.platform === 'darwin') controlNote = '录屏权限用于共享画面。允许键鼠控制还需要 macOS 的「辅助功能」权限。';
-  $('control-note').textContent = [preparing && shareScopeText(null),t(controlNote)].filter(Boolean).join(' ');
-  $('control-note').hidden = !controlNote && !preparing;
+  $('control-note').textContent = t(controlNote);
+  $('control-note').hidden = !controlNote;
   $('screen-recovery').hidden = true;
   $('consent-screen-settings').hidden = true;
   $('use-system-picker').disabled = false;
   $('reject').disabled = false;
   if (!event.automatic) $('consent').showModal();
-  if (!requestedFiles) await readConsentScreens(!!(preparing && event.saved?.mode === 'screen'));
-  if (!event.automatic || !currentRequest(request)) return;
-  const pickerSaved = ['native-display','system-picker'].includes(event.saved?.mode);
-  // Reuse only the same display. A removed monitor must never silently fall
-  // back to a different screen. A system-selected source still needs the OS.
-  if (request.matched && !$('accept').disabled) await acceptScreen(false);
-  else if (pickerSaved && !$('use-system-picker').hidden &&
-      (event.saved.mode === 'native-display' ? info.canUseNativeScreenPicker : !info.canUseNativeScreenPicker)) {
+  if (requestedFiles) return;
+  if (event.automatic && event.saved.mode === 'native-display' && info.canUseNativeScreenPicker) {
+    // This source was approved in the OS picker. Reopen it directly on the
+    // host's Start gesture, even when desktopCapturer cannot enumerate screens.
+    usePickerInsteadOfList(true);
     await acceptScreen(true);
+  } else {
+    await readConsentScreens(!!(preparing && event.saved?.mode === 'screen'));
+    if (!event.automatic || !currentRequest(request)) return;
+    if (request.matched && !$('accept').disabled) await acceptScreen(false);
+    // When a saved display disappeared, the OS picker lets the host select
+    // its replacement. A view-only fallback needs explicit confirmation if
+    // the saved preference requested control.
+    if (currentRequest(request) && !request.matched && !$('use-system-picker').hidden &&
+        (info.canUseNativeScreenPicker || !event.saved.control)) {
+      await acceptScreen(true);
+    }
   }
   if (currentRequest(request) && !$('consent').open) $('consent').showModal();
 }
@@ -861,7 +893,8 @@ async function publishSelection(request, source, control) {
   const draft = preparedHost;
   const live = () => preparedHost === draft && generation === request.generation && !['idle','closing'].includes(phase);
   if (!draft || draft.id !== request.id || !live()) throw new Error('连接请求已失效。');
-  await api.selectSharing(control,source,request.id);
+  const selection = await api.selectSharing(control,source,request.id);
+  draft.inputStatus = control ? selection?.inputStatus : undefined;
   const mode = ['native-display','system-picker','files'].includes(source) ? source : 'screen';
   const choice = {mode,control,name:'',displayId:''};
   try {
@@ -876,7 +909,8 @@ async function publishSelection(request, source, control) {
         choice.name = option.textContent;
         choice.displayId = option.dataset.displayId;
       }
-      const stream = await captureElectronScreen({requestId:request.id,systemPicker:mode === 'system-picker',controlRequested:control},live);
+      const stream = await captureElectronScreen({requestId:request.id,systemPicker:mode === 'system-picker',
+        controlRequested:control && !['denied','unknown'].includes(draft.inputStatus)},live);
       if (!live()) { stream?.getTracks().forEach(track => track.stop()); throw new Error('连接请求已失效。'); }
       draft.stream = stream;
       const track = stream?.getVideoTracks()[0];
@@ -932,12 +966,15 @@ async function acceptScreen(usePicker) {
     if (!currentRequest(request)) return;
     const message = describeError(e);
     if (Object.hasOwn(screenErrors,message)) showSourceFailure(message);
+    else if (!usePicker && (['NotAllowedError','NotReadableError','NotFoundError'].includes(e.name) || message === t('未获取到屏幕画面。'))) {
+      showSourceFailure(e.name === 'NotAllowedError' ? 'permission-denied' : 'source-unavailable');
+    }
     else {
       const needsInputAccess = message === 'control-permission';
       notice('consent-notice',needsInputAccess ? '键鼠控制尚未获准。开启辅助功能后重试，或取消勾选键鼠控制以仅共享画面。' :
         message.startsWith('native-picker-') ? nativePickerError(message) : message,true);
       $('consent-input-settings').hidden = !needsInputAccess;
-      $('screen-recovery').hidden = needsInputAccess;
+      $('screen-recovery').hidden = !!$('screens').value;
       $('accept').disabled = !$('screens').value;
     }
     $('reject').disabled = false;
@@ -985,6 +1022,9 @@ $('reject').onclick = rejectRequest;
 
 function showPermission(value) {
   if (!isCurrent(value)) return;
+  $('input-recovery').hidden = !(value.role === 'host' && value.canRetryInput && value.captureReady && !value.allowControl);
+  $('session-input-settings').hidden = info.platform !== 'darwin' || value.inputStatus !== 'denied';
+  $('retry-input').disabled = value.retryingInput === true;
   if (value.role === 'viewer') {
     $('remote-video').toggleAttribute('data-embedded-pointer',value.allowControl && value.embeddedPointer === true);
   }
@@ -998,16 +1038,49 @@ function sharePermission(value) {
   if (value.role === 'host') send(value.channel, {kind:'permission',allowControl:value.allowControl,embeddedPointer:value.embeddedPointer === true});
   showPermission(value);
 }
-function controlUnavailable(value, message) {
+function controlUnavailable(value, message, details = {}) {
   if (!isCurrent(value) || value.role !== 'host') return;
+  value.inputRevision++;
   const track = value.stream?.getVideoTracks()[0];
-  if (value.allowControl && track && !value.nativePicker && track.getSettings().cursor === 'never') {
-    track.applyConstraints({...track.getConstraints(),cursor:'always'}).catch(() => {});
+  if (value.nativePicker) value.embeddedPointer = true;
+  else if (track && track.getSettings().cursor === 'never') {
+    track.applyConstraints({...track.getConstraints(),cursor:'always'}).then(() => {
+      if (!isCurrent(value)) return;
+      value.embeddedPointer = ['always','motion'].includes(track.getSettings().cursor);
+      sharePermission(value);
+    }).catch(() => {});
   }
+  if (details.inputStatus) value.inputStatus = details.inputStatus;
+  if (details.canRetry !== undefined) value.canRetryInput = details.canRetry;
   value.allowControl = false;
   sharePermission(value);
   notice('session-notice', message || '键鼠控制暂时不可用，已切换为仅观看。', true);
 }
+$('retry-input').onclick = async () => {
+  const value = room;
+  if (value?.role !== 'host' || !value.canRetryInput || !value.captureReady || value.allowControl || value.retryingInput) return;
+  const revision = value.inputRevision;
+  value.retryingInput = true;
+  showPermission(value);
+  try {
+    const result = await api.retryInput(value.requestId);
+    if (!isCurrent(value) || revision !== value.inputRevision || result?.allowControl !== true) return;
+    value.allowControl = true;
+    value.inputStatus = 'granted';
+    if (preparedHost && preparedHost.id === value.shareId) preparedHost.inputStatus = 'granted';
+    if (value.nativePicker) value.embeddedPointer = result.nativeCursorEmbedded === true;
+    else value.embeddedPointer = ['always','motion'].includes(value.stream?.getVideoTracks()[0]?.getSettings().cursor);
+    sharePermission(value);
+    notice('session-notice');
+  } catch (error) {
+    if (!isCurrent(value)) return;
+    const message = describeError(error);
+    notice('session-notice',message === 'control-permission' ? '请在系统设置的「隐私与安全性 → 辅助功能」中允许 CC Connect 控制键鼠。' : message,true);
+  } finally {
+    value.retryingInput = false;
+    if (isCurrent(value)) showPermission(value);
+  }
+};
 function setQuality(id) {
   if (!Object.hasOwn(profiles,id)) return;
   quality = id;
@@ -1328,6 +1401,8 @@ function startSession(event) {
     pc, baseIce:iceServers, managedURLs:new Set(managedServers.flatMap(server => [server.urls].flat())), role:host ? 'host' : 'viewer',
     requestId:event.requestId, shareId:event.shareId, systemPicker, nativePicker, filesOnly, preparedStream,
     preparedSelection:!filesOnly && draft?.nativeSelection, controlRequested:host && !filesOnly && event.controlRequested === true,
+    nativeCursorEmbedded:event.nativeCursorEmbedded, canRetryInput:host && !filesOnly && event.canRetryInput === true,
+    inputStatus:draft?.inputStatus, inputRevision:0,
     allowControl:host && !systemPicker && !nativePicker && !filesOnly && event.allowControl === true,
     profile:'balanced', managedWan:event.managedWan === true,
     managedIceUnavailable:event.managedIceUnavailable === true,
@@ -1454,14 +1529,17 @@ async function capture(value) {
     if (!track || track.readyState !== 'live') { void stopForSourceError(value,'未获取到屏幕画面。'); return; }
     // A backend may ignore the cursor constraint. Advertise what it actually
     // captures so the viewer retains exactly one pointer on the remote image.
-    value.embeddedPointer = value.nativePicker ? !value.controlRequested : ['always','motion'].includes(track.getSettings().cursor);
+    value.embeddedPointer = value.nativePicker ? (value.nativeCursorEmbedded ?? !value.controlRequested) : ['always','motion'].includes(track.getSettings().cursor);
     track.onended = () => { void stopForSourceError(value,'本机屏幕共享已停止。'); };
     if (!value.systemPicker) {
+      const revision = value.inputRevision;
       const allowControl = value.nativePicker ? await api.screenStreamReady(value.requestId,value.nativeCapture.id)
         : await api.screenStreamReady(value.requestId);
       if (!isCurrent(value)) return;
       if (track.readyState !== 'live') { void stopForSourceError(value,'本机屏幕共享已停止。'); return; }
-      value.allowControl = allowControl === true;
+      value.allowControl = allowControl === true && revision === value.inputRevision;
+      value.captureReady = true;
+      if (value.allowControl && preparedHost && preparedHost.id === value.shareId) preparedHost.inputStatus = 'granted';
       sharePermission(value);
       if (value.nativePicker && value.controlRequested && !value.nativeCapture.matched && !value.allowControl) {
         notice('session-notice','无法确认所选显示器的键鼠坐标，本次仅共享画面。');
@@ -1697,7 +1775,11 @@ async function handleEvent(event) {
       break;
     }
     case 'control-unavailable':
-      if (room?.role === 'host' && (!event.requestId || room.requestId === event.requestId)) controlUnavailable(room,event.message);
+      if (preparedHost?.continuous && event.shareId === preparedHost.id && event.requestId === preparedHost.requestId) {
+        preparedHost.inputStatus = event.inputStatus;
+        syncHome();
+      }
+      if (room?.role === 'host' && (!event.requestId || room.requestId === event.requestId)) controlUnavailable(room,event.message,event);
       break;
     case 'closed':
       if (phase !== 'idle') backHome(event.reason || '对方已结束连接。', event.error === true);
