@@ -1,5 +1,7 @@
 import { accessError, accountRoutes, authenticate, fingerprint, rate } from './auth.js';
 import { closeRoomRelay, managedIce, inspectRelayIfDue } from './usage.js';
+import { deviceRoutes } from './device-alias.js';
+import { liveSession, membersLive } from './membership.js';
 
 // Only invitation-key holders can complete the endpoint-to-endpoint challenge.
 // This service routes their opaque signaling packets and never receives the key.
@@ -23,11 +25,6 @@ function reply(status, body = null) {
 
 // Caller and both role owners must still have a current, approved login.
 // Checking this inside the SQL mutation also covers logout during a slow PUT.
-const liveSession = (account,session) => `EXISTS(SELECT 1 FROM account_sessions s
-  JOIN accounts a ON a.id=s.account WHERE s.digest=${session} AND s.account=${account}
-  AND s.expires>(julianday('now')-2440587.5)*86400000 AND a.status='approved')`;
-const membersLive = liveSession('r.host_account','r.host_session') +
-  ' AND (r.viewer IS NULL OR '+liveSession('r.viewer_account','r.viewer_session')+')';
 const membership = role => `r.${role}=? AND r.${role}_account=? AND r.${role}_session=? AND ${membersLive}`;
 
 async function register(db, request, id, role, token, now, actor) {
@@ -156,11 +153,12 @@ async function submit(db, request, id, role, token, seq, now, actor) {
 async function handle(request, env, ctx) {
   const url = new URL(request.url);
   if (request.method === 'GET' && url.pathname === '/health') {
-    await env.DB.prepare('SELECT singleton FROM admin_setup LIMIT 1').first();
-    return Response.json({ service: 'cc-connect-pair', protocol: 1 }, { headers });
+    await env.DB.prepare('SELECT EXISTS(SELECT 1 FROM admin_setup), EXISTS(SELECT 1 FROM device_aliases)').first();
+    return Response.json({ service:'cc-connect-pair', protocol:1, deviceCodes:true }, {headers});
   }
   const accountResponse = await accountRoutes(request,env);
   if (accountResponse) return accountResponse;
+  if (url.pathname.startsWith('/v1/devices/')) return deviceRoutes(request,url,env.DB);
   const match = PATH.exec(url.pathname);
   if (!match || url.search) return reply(404);
   const [, id, role, sequence, ice] = match;

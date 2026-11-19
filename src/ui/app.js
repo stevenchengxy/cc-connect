@@ -28,6 +28,7 @@ let lastNativeTest = null;
 let inputPermission = null;
 let inputReadId = 0;
 let settingsViewId = 0;
+let rotatingDeviceCode = false;
 let expiryTimer;
 let joinTimer;
 let joinMode = 'screen';
@@ -165,6 +166,8 @@ function setAccount(next) {
   if (account.status !== 'approved') {
     info.iceServers = [];
     $('invite-input').value = '';
+    if ($('rotate-dialog').open) $('rotate-dialog').close();
+    notice('rotation-result');
     $('advanced-settings').open = false;
     $('turn-password').value = '';
     if (phase !== 'idle') backHome('账号授权已结束。', true);
@@ -249,6 +252,8 @@ function syncHome() {
   $('sharing-permissions').disabled = phase === 'request';
   $('settings-end').hidden = phase !== 'session';
   $('advanced-settings').hidden = !canPair;
+  $('device-code-setting').hidden = account.status !== 'approved';
+  $('rotate-device-code').disabled = !canPair || rotatingDeviceCode;
   $('update-button').disabled = !idle;
 }
 function updateInfo(data) {
@@ -369,9 +374,10 @@ $('join-form').onsubmit = async (event) => {
   }, 120_000);
   try {
     await api.join(invite,joinMode);
-    // Registration has claimed this one-use invitation, even if the host
-    // later declines or the connection closes without a video frame.
-    if (generation === token && $('invite-input').value.trim() === invite) $('invite-input').value = '';
+    // Keep a reusable device address in this window for the next connection.
+    // Old one-time and compatibility invitations are consumed on claim.
+    const reusable = /^CC[2-9A-HJ-NP-Z]{12}$/i.test(invite.replace(/[\s-]/g,''));
+    if (!reusable && generation === token && $('invite-input').value.trim() === invite) $('invite-input').value = '';
   }
   catch (e) { if (generation === token) await disconnect(describeError(e), true); }
 };
@@ -385,9 +391,9 @@ function savedSharing() {
   return null;
 }
 function shareScopeText(choice) {
-  if (!choice) return t('首位持码成员可按你选择的权限连接一次。');
-  if (choice.mode === 'files') return t('首位持码成员可连接一次，仅传文件。');
-  return t('持码成员可连接一次 · {display} · {scope}', {
+  if (!choice) return t('每次开启共享，首位持固定码的成员可按你选择的权限连接。');
+  if (choice.mode === 'files') return t('本次仅允许一位持码成员传输文件。');
+  return t('本次共享 · {display} · {scope}', {
     display:choice.name || t('系统选择的屏幕'), scope:t(choice.control ? '允许键鼠控制' : '仅观看')
   });
 }
@@ -417,9 +423,9 @@ function showInvite(result, token) {
       clearInterval(expiryTimer);
       // The pairing process owns expiry. Its consent event may already be
       // in flight when this display-only countdown reaches zero.
-      $('host-help').textContent = t('配对码已过期。请生成新的配对码。');
+      $('host-help').textContent = t('本次等待已结束，可再次开启共享。');
     } else {
-      const lifetime = t('剩余 {time} 有效', {time: Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0')});
+      const lifetime = t('本次等待还剩 {time}', {time: Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0')});
       $('host-help').textContent = internetAvailable === false
         ? t('公网配对暂不可用。此码仅限局域网或 VPN。') + ' ' + lifetime
         : lifetime;
@@ -457,6 +463,27 @@ $('host-button').onclick = () => openHost();
 $('host-files').onclick = () => openHost({files:true});
 $('host-options').onclick = () => openHost({configure:true});
 $('host-review').onclick = () => openHost({manual:true});
+$('rotate-device-code').onclick = () => {
+  if (phase === 'idle' && account.status === 'approved' && !rotatingDeviceCode) $('rotate-dialog').showModal();
+};
+$('rotate-cancel').onclick = () => $('rotate-dialog').close();
+$('rotate-confirm').onclick = async () => {
+  if (!$('rotate-dialog').open || rotatingDeviceCode || phase !== 'idle' || account.status !== 'approved') return;
+  const username = account.username;
+  rotatingDeviceCode = true;
+  $('rotate-dialog').close();
+  syncHome();
+  notice('rotation-result','正在更换配对码…');
+  try {
+    await api.rotateDeviceCode();
+    if (account.username === username && account.status === 'approved') notice('rotation-result','配对码已更换，下次共享时可复制新码。');
+  } catch (error) {
+    if (account.username === username && account.status === 'approved') notice('rotation-result',describeError(error),true);
+  } finally {
+    rotatingDeviceCode = false;
+    syncHome();
+  }
+};
 $('cancel-join').onclick = () => disconnect('已取消配对。');
 $('cancel-host').onclick = () => disconnect('邀请已取消。');
 $('end-session').onclick = () => disconnect('连接已结束。');
@@ -661,7 +688,7 @@ function currentRequest(request) {
   return request && request === pendingRequest && !request.declining && request.generation === generation && phase === 'request';
 }
 function pickerButton(native) {
-  if (pendingRequest?.preparing) return native ? '选屏并生成配对码' : '选屏并生成仅观看配对码';
+  if (pendingRequest?.preparing) return native ? '选屏并开启共享' : '选屏并开启仅观看共享';
   return native ? '同意连接，随后选屏' : '同意仅观看，随后选屏';
 }
 function showSourceFailure(code) {
@@ -739,7 +766,7 @@ async function requestConsent(event) {
   peerName = preparing ? '' : event.name || t('远端设备');
   setStatus(preparing ? '正在创建邀请' : '收到连接请求', 'pending');
   $('consent-title').textContent = t(preparing ? '授权一次连接' : requestedFiles ? '允许与「{name}」传输文件？' : '允许「{name}」查看屏幕？', {name:peerName});
-  label('accept', preparing ? '授权并生成配对码' : '开始共享');
+  label('accept', preparing ? '开启共享' : '开始共享');
   label('reject', preparing ? '取消' : '拒绝');
   $('consent-symbol').setAttribute('href',requestedFiles ? '#i-share' : '#i-display');
   $('consent-screen-options').hidden = requestedFiles;
@@ -756,7 +783,7 @@ async function requestConsent(event) {
   if (!info.inputSupported) controlNote = '本机仅支持观看。';
   else if (info.canUseNativeScreenPicker) controlNote = '键鼠控制需要 macOS 辅助功能授权。只共享画面时可不勾选。';
   else if (info.platform === 'darwin') controlNote = '录屏权限用于共享画面。允许键鼠控制还需要 macOS 的「辅助功能」权限。';
-  $('control-note').textContent = [preparing && t('首位持码成员可按你选择的权限连接一次。'),t(controlNote)].filter(Boolean).join(' ');
+  $('control-note').textContent = [preparing && t('每次开启共享，首位持固定码的成员可按你选择的权限连接。'),t(controlNote)].filter(Boolean).join(' ');
   $('control-note').hidden = !controlNote && !preparing;
   $('screen-recovery').hidden = true;
   $('consent-screen-settings').hidden = true;
@@ -812,6 +839,11 @@ async function publishSelection(request, source, control) {
   }
   if (!live()) return;
   draft.choice = choice;
+  // A returning viewer may already know the fixed address and claim it before
+  // the publish response arrives. Save exactly what the host authorized first.
+  if (mode !== 'files') {
+    try { localStorage.setItem('cc-share:' + account.username, JSON.stringify(choice)); } catch {}
+  }
   if ($('consent').open) $('consent').close();
   pendingRequest = null;
   phase = 'opening';
@@ -819,9 +851,6 @@ async function publishSelection(request, source, control) {
   try {
     const invite = await api.publishHost(request.id);
     if (!live()) return;
-    if (mode !== 'files') {
-      try { localStorage.setItem('cc-share:' + account.username, JSON.stringify(choice)); } catch {}
-    }
     showInvite(invite,request.generation);
   } catch (error) {
     if (live()) await disconnect(describeError(error), true);

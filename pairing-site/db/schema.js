@@ -64,6 +64,18 @@ export const messages = sqliteTable('messages', {
 }, t => [primaryKey({ columns:[t.room,t.sender,t.seq] }),
   index('messages_pending').on(t.room,t.sender,t.seq).where(sql`size > 0`)]);
 
+// Device locators remain reserved when their short-lived room is collected.
+// The host encrypts its current invitation before publication.
+export const deviceAliases = sqliteTable('device_aliases', {
+  alias: text('alias').primaryKey(),
+  owner: text('owner').notNull().references(() => accounts.id),
+  managerDigest: text('manager_digest').notNull(),
+  room: text('room').references(() => rooms.id, {onDelete:'set null'}),
+  roomCreated: integer('room_created').notNull().default(0),
+  envelope: text('envelope'),
+  retired: integer('retired').notNull().default(0)
+}, t => [uniqueIndex('device_aliases_room').on(t.room)]);
+
 // One short-lived credential cache entry and one issuance lease per member.
 export const turnGrants = sqliteTable('turn_grants', {
   room: text('room').notNull().references(() => rooms.id, {onDelete:'cascade'}),

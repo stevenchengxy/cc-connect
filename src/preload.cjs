@@ -21,6 +21,7 @@ contextBridge.exposeInMainWorld('jianping', {
   selectSharing: call('select-sharing'),
   resetHostSelection: call('reset-host-selection'),
   publishHost: call('publish-host'),
+  rotateDeviceCode: call('rotate-device-code'),
   join: call('join'),
   accept: call('accept'),
   reject: call('reject'),

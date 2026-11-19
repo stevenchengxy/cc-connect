@@ -43,6 +43,13 @@
       "when": 1795009203443,
       "tag": "0005_acknowledged_signaling",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1795074982420,
+      "tag": "0006_persistent_device_aliases",
+      "breakpoints": true
     }
   ]
 }

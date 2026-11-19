@@ -349,7 +349,7 @@ async function run() {
       await host.locator('#host-review').click()
       await host.locator('#host-invite').waitFor({ state: 'visible' })
       const shortCode = await host.locator('#host-invite').inputValue()
-      assert.match(shortCode, /^[2-9A-HJ-NP-Z]{4}-[2-9A-HJ-NP-Z]{4}-[2-9A-HJ-NP-Z]{4}$/)
+      assert.match(shortCode, /^CC-(?:[2-9A-HJ-NP-Z]{4}-){2}[2-9A-HJ-NP-Z]{4}$/)
       let invite = shortCode
       if (copyCompatible) {
         const invitationNotice = await host.locator('#home-notice').textContent()
@@ -361,9 +361,10 @@ async function run() {
         await host.getByRole('button', {name:/旧版|兼容/}).click()
         invite = await readCopiedCode(value => value.startsWith('RD1.'))
         const legacy = JSON.parse(Buffer.from(invite.slice(4), 'base64url'))
-        const {normalizePairCode, pairSecret} = require('../src/pair-code.cjs')
-        const key = await pairSecret(normalizePairCode(shortCode))
-        assert(legacy.key === key.toString('base64url'), 'Both copy actions must refer to one host invitation')
+        assert.equal(legacy.account,1)
+        assert.equal(legacy.managed,1)
+        assert.equal(Buffer.from(legacy.key,'base64url').length,32)
+
       }
       await viewer.locator('#invite-input').fill(invite)
       await viewer.locator(fileOnly ? '#join-files' : '#join-button').click()
@@ -372,7 +373,7 @@ async function run() {
       assert.equal(await viewer.locator(fileOnly ? '#join-button' : '#join-files').getAttribute('aria-busy'), 'false')
       assert.equal(await host.locator('#copy-feedback').textContent(), '')
       assert.equal(await host.locator('#host-invite').isVisible(), false, 'A claimed code must no longer be offered for copying')
-      assert.equal(await viewer.locator('#invite-input').inputValue(), '', 'A claimed code must not be reused on reconnection')
+      assert.equal(await viewer.locator('#invite-input').inputValue(), copyCompatible ? '' : shortCode, 'Only reusable addresses remain in the connection field')
       assert.equal(await host.locator('#allow-control').isChecked(), false)
     }
     await pair(!!fixture)
@@ -539,6 +540,7 @@ async function run() {
         return invite
       }
       const supportsInput = await host.evaluate(async () => (await window.jianping.info()).inputSupported)
+      await fixture.waitForHostSlot()
       await hostButton.click()
       await host.locator('#consent[open]').waitFor()
       assert.equal(await code.isVisible(),false)
@@ -551,9 +553,10 @@ async function run() {
       await host.locator('#cancel-host').click()
       await hostButton.waitFor({state:'visible'})
       assert(await captureIsDenied(), 'Cancelling the prepared invite must revoke the capture grant')
+      await fixture.waitForHostSlot()
       await hostButton.click()
       await code.waitFor({state:'visible'})
-      assert.notEqual(await code.inputValue(),first)
+      assert.equal(await code.inputValue(),first,'Cancelling and restarting must retain the address')
       assert.equal(await host.locator('#consent').isVisible(),false, 'The same monitor should not need another selection')
       const listed = (await readCaptureQA()).listCalls
       const beforeConnect = await readCaptureQA()
@@ -597,10 +600,33 @@ async function run() {
       await viewer.locator('#home-notice.error').waitFor({state:'visible'})
       assert.equal(await viewer.locator('#remote-video').evaluate(v => v.srcObject),null)
 
+      await host.locator('#settings-button').click()
+      await host.locator('#rotate-device-code').click()
+      await host.locator('#rotate-cancel').click()
+      await host.locator('#close-settings').click()
+      await fixture.waitForHostSlot()
+      await host.locator('#host-files').click()
+      await code.waitFor({state:'visible'})
+      assert.equal(await code.inputValue(),first)
+      await host.locator('#cancel-host').click()
+      await host.locator('#settings-button').click()
+      await host.locator('#rotate-device-code').click()
+      await host.locator('#rotate-confirm').click()
+      await waitForNotice('rotation-result','配对码已更换')
+      await host.locator('#close-settings').click()
+
       // A files-only invitation cannot be upgraded by the viewer's Screen button.
       await setCaptureQA({screenPermission:'restricted',listFails:true})
       const beforeFileCode = await readCaptureQA()
+      await fixture.waitForHostSlot()
       await host.locator('#host-files').click()
+      await code.waitFor({state:'visible'})
+      assert.notEqual(await code.inputValue(),first,'Manual rotation must replace the address')
+      await viewer.locator('#invite-input').fill(first)
+      await viewer.locator('#join-button').click()
+      await viewer.waitForFunction(() => document.getElementById('home-notice').classList.contains('error') &&
+        !document.getElementById('home-notice').hidden && !document.getElementById('join-button').disabled)
+      assert(await code.isVisible(),'The retired code must not claim the new sharing window')
       await connectWithCode()
       for (const page of [host,viewer]) await page.locator('#session[data-mode="files"]').waitFor()
       assert.equal(await viewer.locator('#remote-video').evaluate(v => v.srcObject),null)
@@ -609,6 +635,7 @@ async function run() {
       await stop()
       await setCaptureQA({screenPermission:'granted',listFails:false})
       // Conversely, a files-only request must release an already prepared screen.
+      await fixture.waitForHostSlot()
       await hostButton.click()
       await connectWithCode(true)
       for (const page of [host,viewer]) await page.locator('#session[data-mode="files"]').waitFor()
@@ -619,6 +646,7 @@ async function run() {
       if (nativePicker) {
         await setCaptureQA({listFails:true,cancelNativePicker:true,inputPermission:'granted'})
         const before = await readCaptureQA()
+        await fixture.waitForHostSlot()
         await host.locator('#host-options').click()
         await host.locator('#use-system-picker').click()
         await waitForNotice('consent-notice','已取消选择屏幕')
@@ -637,6 +665,7 @@ async function run() {
         assert.equal((await readCaptureQA()).nativeActive,0)
         // If macOS ends its selected source before anyone joins, the
         // published invitation must go away along with the local capture.
+        await fixture.waitForHostSlot()
         await hostButton.click()
         await code.waitFor({state:'visible'})
         await apps[0].evaluate(({session}) => session.defaultSession.stopSyntheticPicker())
@@ -647,6 +676,7 @@ async function run() {
       }
       if (pickerSupported && !nativePicker) {
         await setCaptureQA({screenPermission:'granted',listFails:true,cancelPicker:false})
+        await fixture.waitForHostSlot()
         await host.locator('#host-options').click()
         await host.locator('#use-system-picker').click()
         await code.waitFor({state:'visible'})
@@ -660,13 +690,14 @@ async function run() {
       }
       // Emit only inside this isolated Electron main process. The operator's
       // machine never locks and the source remains the synthetic window.
+      await fixture.waitForHostSlot()
       await host.locator('#host-files').click()
       await code.waitFor({state:'visible'})
       await apps[0].evaluate(({powerMonitor}) => powerMonitor.emit('lock-screen'))
       await hostButton.waitFor({state:'visible'})
       assert.equal(await code.inputValue(),'')
       assert(await captureIsDenied())
-      console.log('Verified saved display and control, one-time codes, cancellation, file-only permissions and code-to-video with no host interaction after publication.')
+      console.log('Verified stable codes across sessions, manual rotation and retired code refusal, saved control, isolated file sessions and code-to-video with no host interaction after publication.')
     }
     const beforeRetry = await readCaptureQA()
     if (localCaptureQA) await setCaptureQA({screenPermission:process.platform === 'darwin' ? 'denied' : 'granted',listFails:true})

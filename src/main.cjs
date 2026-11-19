@@ -11,6 +11,7 @@ const { InputBridge } = require('../native/bridge.cjs')
 const { NativeScreenCapture, supportsNativePicker, nativeHelperAvailable } = require('../native/screen-bridge.cjs')
 const { Settings } = require('./settings.cjs')
 const { DesktopAccount, messages } = require('./account.cjs')
+const { DeviceCodes, normalizeDeviceCode } = require('./device-code.cjs')
 const { AdminConsole } = require('./admin-console.cjs')
 const { Updater } = require('./updater.cjs')
 const { FileTransfer, LocalFilePanel } = require('./file-transfer.cjs')
@@ -50,6 +51,8 @@ function nativeText(zh, tw, en) {
 let window
 let preferences
 let account
+let deviceCodes
+let codeRotation
 let adminConsole
 let current
 let tray
@@ -105,10 +108,12 @@ function trusted(frame) {
 }
 
 function finish(reason = '连接已结束', error = false) {
+  codeRotation?.controller.abort()
   diagnosticCapture?.stop()
   const active = current
   current = null
   if (!active) return
+  active.controller.abort()
   if (pickerGrant) disarmSystemPicker(pickerGrant.id)
   active.allowControl = false
   if (active.input) inputDrained = Promise.all([inputDrained, active.input.stop()]).then(() => {})
@@ -147,13 +152,15 @@ function showSharingIndicator() {
 function createSession(role, token) {
   if (!token || account.approvedToken !== token) throw new Error(messages.account_required)
   if (installingUpdate) throw new Error('更新任务正在进行，请稍候。')
+  if (codeRotation) throw new Error('固定配对码正在更换，请稍后再试。')
   if (current || saveInProgress) throw new Error('请先结束当前配对，或等待网络设置保存完成。')
   diagnosticCapture?.stop()
   const network = new PairingNetwork({
     managedUrl, accountOnly: true, accountToken: token,
     fetchImpl: (url, init) => session.defaultSession.fetch(url, { ...init, credentials: 'omit' })
   })
-  const active = { network, role, token, phase: 'pairing', requestId: randomUUID(), allowControl: false }
+  const active = { network, role, token, username:account.state.username, controller:new AbortController(),
+    phase:'pairing', requestId:randomUUID(), allowControl:false }
   current = active
   active.network.on('event', event => {
     if (current !== active) return
@@ -206,6 +213,22 @@ function createSession(role, token) {
     }
   })
   return active
+}
+
+function requireLiveSession(active) {
+  if (current !== active || active.controller.signal.aborted || account.approvedToken !== active.token) {
+    throw new Error('连接已结束。')
+  }
+}
+
+async function publishDeviceInvite(active) {
+  const sessionInvite = await active.network.host({name:deviceName})
+  requireLiveSession(active)
+  const registration = active.network.hostRoomCredentials()
+  const invite = await deviceCodes.publish(active.username, active.token,
+    {...registration, invite:sessionInvite.legacyInvite}, active.controller.signal)
+  requireLiveSession(active)
+  return {...sessionInvite, invite}
 }
 
 function requireHostPhase(requestId, ...phases) {
@@ -323,6 +346,19 @@ function registerHandlers() {
   handle('account-refresh', () => account.refresh())
   handle('open-admin-console', () => adminConsole.open(window, language))
   handle('account-logout', () => account.logout())
+  handle('rotate-device-code', async () => {
+    if (current || installingUpdate) throw new Error('请先结束当前共享，再更换固定配对码。')
+    if (codeRotation) throw new Error('固定配对码正在更换，请稍后再试。')
+    const token = account.approvedToken
+    if (!token) throw new Error(messages.account_required)
+    const operation = codeRotation = {token, controller:new AbortController()}
+    try {
+      if (await account.requireApproved() !== token || operation.controller.signal.aborted) throw new Error('账号授权已结束。')
+      const result = await deviceCodes.rotate(account.state.username, token, operation.controller.signal)
+      if (account.approvedToken !== token || operation.controller.signal.aborted) throw new Error('账号授权已结束。')
+      return result
+    } finally { codeRotation = null }
+  })
   handle('input-status', () => process.platform === 'darwin' ? InputBridge.macAccess(nativeOptions, false) : null)
   handle('screen-status', async () => {
     const { report } = await capture.inspect(true)
@@ -362,6 +398,7 @@ function registerHandlers() {
   handle('download-update', () => updater.download())
   handle('install-update', async () => {
     if (current) throw new Error('请先结束远程连接，再安装更新。')
+    if (codeRotation) throw new Error('固定配对码正在更换，请稍后再试。')
     if (installingUpdate) throw new Error('更新任务正在进行，请稍候。')
     installingUpdate = true
     try {
@@ -378,13 +415,19 @@ function registerHandlers() {
   })
   for (const role of ['host', 'viewer']) {
     handle(role === 'host' ? 'host' : 'join', async (invite, intent) => {
-      const token = await account.requireApproved()
-      const active = createSession(role, token)
-      const options = { name: deviceName }
+      // Reserve the session before the first asynchronous check so a Stop,
+      // lock, or logout also cancels a slow account check or alias resolution.
+      const active = createSession(role, account.approvedToken)
       try {
-        return role === 'host'
-          ? await active.network.host(options)
-          : await active.network.join({ ...options, invite, intent })
+        if (await account.requireApproved() !== active.token) throw new Error(messages.account_required)
+        requireLiveSession(active)
+        if (role === 'host') return await publishDeviceInvite(active)
+        let resolved = invite
+        if (normalizeDeviceCode(invite)) {
+          resolved = await deviceCodes.resolve(invite, active.token, active.controller.signal)
+        }
+        requireLiveSession(active)
+        return await active.network.join({name:deviceName, invite:resolved, intent})
       } catch (err) {
         if (current === active) finish(err.message, true)
         throw err
@@ -416,7 +459,7 @@ function registerHandlers() {
     try {
       if (await account.requireApproved() !== active.token) throw new Error(messages.account_required)
       requireHostPhase(requestId, 'pairing')
-      return await active.network.host({name:deviceName})
+      return await publishDeviceInvite(active)
     }
     catch (error) {
       if (current === active) finish(error.message, true)
@@ -737,11 +780,16 @@ if (primaryInstance) app.whenReady().then(async () => {
   if (await offerInstallation()) return
   updater = new Updater({ app, request: systemUpdateTransport(net, session.defaultSession),
     emit: state => send({ type: 'update', state }), canInstall: () => !current })
-  account = new DesktopAccount({
+  const credentialOptions = {
     directory: app.getPath('userData'), storage:safeStorage, base:managedUrl,
-    fetchImpl: (url, init) => session.defaultSession.fetch(url, init),
+    fetchImpl: (url, init) => session.defaultSession.fetch(url, init)
+  }
+  deviceCodes = new DeviceCodes(credentialOptions)
+  account = new DesktopAccount({
+    ...credentialOptions,
     onChange: state => {
       adminConsole?.checkIdentity()
+      if (codeRotation && codeRotation.token !== account.approvedToken) codeRotation.controller.abort()
       if (current && current.token !== account.approvedToken) finish(state.message || '账号授权已结束。')
       send({type:'account', account:state})
     }

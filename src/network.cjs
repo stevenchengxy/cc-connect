@@ -308,6 +308,20 @@ class PairingNetwork extends EventEmitter {
     return direct;
   }
 
+  // Only main publishes this binding. The mailbox owner bearer must never
+  // become part of an invitation or cross the renderer bridge.
+  hostRoomCredentials() {
+    const s = this.state;
+    if (this.accountOnly && s?.role === 'host' && !s.peer && Date.now() < s.inviteExpiresAt) {
+      const [mailbox] = s.sockets;
+      if (mailbox instanceof Mailbox && mailbox.registered && mailbox.readyState === WebSocket.OPEN) {
+        const room = new URL(mailbox.url).pathname.split('/').at(-2);
+        return {room, hostToken:mailbox.authorization.slice('Bearer '.length)};
+      }
+    }
+    throw new Error('连接已结束。');
+  }
+
   async join({ invite, name, relayUrl, intent = 'screen' } = {}) {
     if (!['screen','files'].includes(intent)) throw new Error('配对请求格式无效。');
     const code = this.accountOnly ? normalizePairCode(invite) : null;

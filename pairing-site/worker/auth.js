@@ -49,7 +49,7 @@ async function passwordDigest(password,salt) {
   return fingerprint(bytes);
 }
 
-async function body(request) {
+export async function jsonBody(request) {
   if (request.headers.get('content-type')?.split(';')[0].trim().toLowerCase() !== 'application/json') return null;
   if (Number(request.headers.get('content-length') || '0') > 8192) return null;
   const reader = request.body?.getReader();
@@ -118,7 +118,7 @@ export function accessError(actor) {
 }
 
 async function createAccount(request, env, kind, now) {
-  const data = await body(request);
+  const data = await jsonBody(request);
   const fields = userFields(data);
   if (!fields) return authError(400,'invalid_request');
   const db = env.DB;
@@ -147,7 +147,7 @@ async function createAccount(request, env, kind, now) {
 }
 
 async function login(request,env,now) {
-  const fields = userFields(await body(request));
+  const fields = userFields(await jsonBody(request));
   if (!fields) return authError(400,'invalid_request');
   const db = env.DB;
   if (!await entryAllowed(request,db,'login',fields.username,now)) return authError(429,'rate_limited');
@@ -220,7 +220,7 @@ async function manageAccount(request,env,id,sessionsOnly) {
   if (!account) return authError(404,'account_not_found');
   let status;
   if (!sessionsOnly) {
-    status = (await body(request))?.status;
+    status = (await jsonBody(request))?.status;
     if (!['approved','suspended','revoked'].includes(status)) return authError(400,'invalid_request');
     if (account.role === 'admin') return authError(403,'admin_protected');
     if (account.status === 'revoked') return authError(409,'account_revoked');
