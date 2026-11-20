@@ -85,6 +85,8 @@ class InputBridge extends EventEmitter {
     await this.closing;
     if (revision !== this.revision) throw new Error('键鼠授权已取消。');
     const args = displayArgs(display);
+    const requestAccess = process.platform === 'darwin' && options?.requestAccess === true;
+    if (requestAccess) args.push('--request-access');
     const child = spawn(binaryPath(options), args, {
       stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true,
     });
@@ -103,7 +105,7 @@ class InputBridge extends EventEmitter {
       const timeout = setTimeout(() => {
         fail('键鼠服务启动超时。');
         this.stop();
-      }, 6000);
+      }, requestAccess ? 120_000 : 6000);
       lines.on('line', line => {
         if (line === 'ACCESS OK') {
           clearTimeout(session.accessTimer);

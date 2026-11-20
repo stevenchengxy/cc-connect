@@ -58,6 +58,7 @@ app.whenReady().then(async () => {
   const ses = session.defaultSession
   const captureQA = ses.captureQA = {screenPermission:'granted',listCalls:0,listFails:false,noDisplays:false,
     pickerCalls:0,cancelPicker:false,inputPermission:'granted',appTrusted:true,inputStartupPermission:null,inputChecks:0,inputPrompts:0,inputSettingsOpened:0,inputAttempts:0,inputStarts:0,inputEvents:[],
+    manualInputAttempts:0,sessionInputPrompts:0,holdInputPrompt:false,
     nativeStarts:0,nativeStops:0,nativeActive:0,nativeFrames:0,nativeDisplayId:900001,
     cancelNativePicker:false,roomRequests:0}
   installSyntheticPicker(ses,captureQA)
@@ -114,9 +115,19 @@ app.whenReady().then(async () => {
       captureQA.inputSettingsOpened++
       // Never open the operator's System Settings during an automated test.
     }
-    InputBridge.prototype.start = async function(display) {
+    InputBridge.prototype.start = async function(display, options = {}) {
       captureQA.inputAttempts++
-      if (display.id !== 900001 || (captureQA.inputStartupPermission ?? captureQA.inputPermission) !== 'granted') throw Error('control-permission')
+      if (options.requestAccess === true) captureQA.manualInputAttempts++
+      if (display.id !== 900001) throw Error('所选显示器不可用。')
+      const granted = () => (captureQA.inputStartupPermission ?? captureQA.inputPermission) === 'granted'
+      if (!granted() && options.requestAccess === true) {
+        captureQA.sessionInputPrompts++
+        if (captureQA.holdInputPrompt) {
+          await new Promise(resolve => { ses.answerInputPrompt = resolve })
+          delete ses.answerInputPrompt
+        }
+      }
+      if (!granted()) throw Error('control-permission')
       captureQA.inputStarts++
       ses.qaInputBridge = this
     }

@@ -29,6 +29,7 @@ let inputPermission = null;
 let inputReportRead = null;
 let inputSettingsWatch = null;
 let settingsViewId = 0;
+let settingsRoomId = null;
 let rotatingDeviceCode = false;
 let expiryTimer;
 let joinTimer;
@@ -577,22 +578,25 @@ $('settings-button').onclick = () => {
   $('turn-password').placeholder = info.turnConfigured ? t('已保存') : '';
   notice('settings-notice');
   settingsViewId++;
+  settingsRoomId = room?.requestId;
   settingsCheck = null;
   inputPermission = null;
   $('settings-dialog').showModal();
   renderScreenCheck();
   void refreshInputPermission();
 };
-function closeSettings() {
+function closeSettings(recheckInput = false) {
   if (!$('settings-dialog').open) return;
   $('turn-password').value = '';
   if (settingsCheck?.nativeTest && settingsCheck.pending) void api.cancelNativeDisplayTest().catch(() => {});
   settingsCheck = null;
   $('settings-dialog').close();
+  if (recheckInput && room?.role === 'host' && room.requestId === settingsRoomId) void refreshInputPermission(true);
+  settingsRoomId = null;
 }
-$('close-settings').onclick = closeSettings;
-$('cancel-settings').onclick = closeSettings;
-$('settings-dialog').oncancel = event => { event.preventDefault(); closeSettings(); };
+$('close-settings').onclick = () => closeSettings(true);
+$('cancel-settings').onclick = () => closeSettings(true);
+$('settings-dialog').oncancel = event => { event.preventDefault(); closeSettings(true); };
 async function refreshInputPermission(retryGranted = false, stillOpen) {
   if (info.platform !== 'darwin') return;
   const settings = $('settings-dialog').open;
@@ -1139,14 +1143,14 @@ function controlUnavailable(value, message, details = {}) {
   sharePermission(value);
   notice('session-notice', message || '键鼠控制暂时不可用，已切换为仅观看。', true);
 }
-$('retry-input').onclick = () => retryHostInput(room);
-async function retryHostInput(value) {
+$('retry-input').onclick = event => retryHostInput(room,event.isTrusted === true);
+async function retryHostInput(value, requestAccess = false) {
   if (value?.role !== 'host' || !value.canRetryInput || !value.captureReady || value.allowControl || value.retryingInput) return;
   const revision = value.inputRevision;
   value.retryingInput = true;
   showPermission(value);
   try {
-    const result = await api.retryInput(value.requestId);
+    const result = await api.retryInput(value.requestId,requestAccess);
     if (!isCurrent(value) || revision !== value.inputRevision || result?.allowControl !== true) return;
     value.allowControl = true;
     value.inputStatus = 'granted';
@@ -1160,9 +1164,30 @@ async function retryHostInput(value) {
     sharePermission(value);
     notice('session-notice');
   } catch (error) {
-    if (!isCurrent(value)) return;
-    const message = describeError(error);
-    notice('session-notice',message === 'control-permission' ? '请在系统设置的「隐私与安全性 → 辅助功能」中允许 CC Connect 控制键鼠。' : message,true);
+    if (!isCurrent(value) || value.allowControl) return;
+    let message = describeError(error);
+    if (message === 'control-permission') {
+      const report = await api.inputStatus(true).catch(() => null);
+      // This failed start also sends one control-unavailable event, which may
+      // reach the renderer before the retry rejects or while the check runs.
+      const ownDenial = value.inputRevision === revision + 1 && value.inputStatus === 'denied';
+      if (!isCurrent(value) || value.allowControl || !value.canRetryInput || (value.inputRevision !== revision && !ownDenial)) return;
+      const status = report?.status || 'unknown';
+      if (status === 'granted') {
+        message = '键鼠权限检测已通过，但 macOS 在本次启动时拒绝了键鼠组件。请退出并重新打开这台 Mac 上的 CC Connect，再开启共享。';
+      } else if (status === 'denied' && report.appTrusted === true) {
+        message = 'CC Connect 已获辅助功能授权，但 macOS 拒绝了键鼠组件。请退出并重新打开共享端的 CC Connect，再开启共享。';
+      } else if (status === 'denied') {
+        message = '请在系统设置的「隐私与安全性 → 辅助功能」中允许 CC Connect 控制键鼠。';
+      } else {
+        message = '未能确认键鼠权限。请打开 CC Connect 的「设置」，查看「键盘与鼠标」的检测结果。';
+      }
+      if (status !== value.inputStatus) {
+        value.inputStatus = status;
+        sharePermission(value);
+      }
+    }
+    notice('session-notice',message,true);
   } finally {
     value.retryingInput = false;
     if (isCurrent(value)) showPermission(value);

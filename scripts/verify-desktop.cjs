@@ -514,10 +514,11 @@ async function run() {
       for (const page of [host,viewer]) await page.locator('#session[data-mode="files"]').waitFor()
       assert.equal((await readCaptureQA()).listCalls,beforeFiles.listCalls)
       assert.equal((await readCaptureQA()).inputStarts,beforeFiles.inputStarts)
-      await assert.rejects(host.evaluate(() => window.jianping.retryInput(room.requestId)),/连接请求已失效/)
+      await assert.rejects(host.evaluate(() => window.jianping.retryInput(room.requestId,true)),/连接请求已失效/)
       assert(await captureIsDenied())
       assert.equal(await viewer.locator('#remote-video').evaluate(video => video.srcObject),null)
       await verifyFileExchange(apps,[host,viewer],temp)
+      assert.equal((await readCaptureQA()).manualInputAttempts,beforeFiles.manualInputAttempts)
       await host.locator('#end-session').click()
       await viewer.locator('#join-button').waitFor({state:'visible'})
       await setCaptureQA({screenPermission:'granted',listFails:false})
@@ -720,14 +721,36 @@ async function run() {
         assert.equal(denied.inputAttempts,beforeDenied.inputAttempts+1)
         assert.equal(denied.inputStarts,beforeDenied.inputStarts)
         assert.equal(denied.inputEvents.length,beforeDenied.inputEvents.length)
+        assert.equal(denied.manualInputAttempts,beforeDenied.manualInputAttempts)
+        assert.equal(denied.sessionInputPrompts,beforeDenied.sessionInputPrompts)
         const liveTrack = () => viewer.locator('#remote-video').evaluate(v => v.srcObject.getVideoTracks()[0].id)
         const track = await liveTrack()
         const roomCount = await host.evaluate(() => window.qaRoomConnections)
-        await assert.rejects(host.evaluate(() => window.jianping.retryInput('earlier-peer')),/连接请求已失效/)
-        await host.locator('#retry-input').click()
-        await waitForNotice('session-notice','辅助功能')
-        assert.equal((await readCaptureQA()).inputStarts,denied.inputStarts)
-        assert.match(await viewer.locator('#permission-state').innerText(),/仅观看/)
+        await assert.rejects(host.evaluate(() => window.jianping.retryInput('earlier-peer',true)),/连接请求已失效/)
+        await assert.rejects(viewer.evaluate(() => window.jianping.retryInput(room.requestId,true)),/连接请求已失效/)
+        await host.evaluate(() => document.querySelector('#retry-input').click())
+        await host.waitForFunction(() => !room.retryingInput)
+        const scriptedRetry = await readCaptureQA()
+        assert.equal(scriptedRetry.inputAttempts,denied.inputAttempts + 1)
+        assert.equal(scriptedRetry.manualInputAttempts,denied.manualInputAttempts,'A scripted click must stay silent')
+        assert.equal(scriptedRetry.sessionInputPrompts,denied.sessionInputPrompts)
+        for (const [inputPermission,appTrusted,reason,peer] of [
+          ['granted',true,'键鼠权限检测已通过','等待共享端启用键鼠'],
+          ['unknown',true,'查看「键盘与鼠标」','等待共享端启用键鼠'],
+          ['denied',true,'macOS 拒绝了键鼠组件','共享端需授权键鼠'],
+          ['denied',false,'辅助功能」中允许 CC Connect','共享端需授权键鼠']
+        ]) {
+          await setCaptureQA({inputPermission,appTrusted})
+          const beforeRetry = await readCaptureQA()
+          await host.locator('#retry-input').click()
+          await waitForNotice('session-notice',reason)
+          assert(await host.locator('#session-notice').evaluate(el => el.classList.contains('error')))
+          await viewer.waitForFunction(peer => document.querySelector('#permission-state').textContent === '仅观看 · ' + peer,peer)
+          const refused = await readCaptureQA()
+          assert.equal(refused.inputStarts,denied.inputStarts)
+          assert.equal(refused.sessionInputPrompts,beforeRetry.sessionInputPrompts + 1)
+          assert.equal(refused.inputEvents.length,denied.inputEvents.length)
+        }
         // Keep the host window unfocused while the user grants access in System Settings.
         // The fixture records the settings action without opening any real system UI.
         await host.evaluate(() => {
@@ -744,6 +767,7 @@ async function run() {
         assert.equal(afterSettings.inputSettingsOpened,beforeSettings.inputSettingsOpened + 1)
         assert(afterSettings.inputChecks >= beforeSettings.inputChecks + 2,'The host must silently observe the first grant')
         assert.equal(afterSettings.inputStarts,beforeSettings.inputStarts + 1)
+        assert.equal(afterSettings.manualInputAttempts,beforeSettings.manualInputAttempts)
         assert(await host.evaluate(() => inputSettingsWatch === null))
         await host.evaluate(() => window.removeEventListener('focus',window.qaSuppressFocus,true))
         assert.equal(await liveTrack(),track)
@@ -783,11 +807,48 @@ async function run() {
         await setCaptureQA({inputPermission:'granted',inputStartupPermission:'granted'})
         await viewer.waitForFunction(() => document.querySelector('#permission-state').textContent.includes('等待共享端启用键鼠'))
         assert.equal((await readCaptureQA()).inputStarts,recovered.inputStarts,'A new OS grant after revocation still requires an explicit retry')
-        // The event-posting process can succeed even when an OS preflight is stale.
-        await setCaptureQA({inputPermission:'denied'})
+        await host.locator('#settings-button').click()
+        await waitForNotice('input-check-result','已获辅助功能授权')
+        const revokedAttempts = (await readCaptureQA()).inputAttempts
+        await host.locator('#close-settings').click()
+        await host.waitForFunction(() => !inputReportRead && !room.retryingInput)
+        assert.equal((await readCaptureQA()).inputAttempts,revokedAttempts)
+        assert.match(await viewer.locator('#permission-state').innerText(),/等待共享端启用键鼠/)
+        // Only the host's click may ask for permission from the input process
+        // that will stay alive and post events. Keep its OS response pending.
+        await setCaptureQA({inputPermission:'denied',inputStartupPermission:'denied',holdInputPrompt:true})
         await host.locator('#retry-input').click()
+        await host.waitForFunction(() => room.retryingInput && document.querySelector('#retry-input').disabled)
+        await apps[0].evaluate(async ({session}) => {
+          for (let i=0; i<100; i++) {
+            if (session.defaultSession.answerInputPrompt) return
+            await new Promise(resolve => setTimeout(resolve,50))
+          }
+          throw Error('Manual retry did not request input access from the event-posting helper')
+        })
+        const pending = await readCaptureQA()
+        assert.equal(pending.sessionInputPrompts,afterSettings.sessionInputPrompts + 1)
+        assert.equal(pending.inputStarts,recovered.inputStarts)
+        assert.match(await viewer.locator('#permission-state').innerText(),/仅观看/)
+        await viewer.locator('#remote-video').click()
+        await viewer.keyboard.press('KeyV')
+        await apps[0].evaluate(({session}) => {
+          const ses = session.defaultSession
+          ses.captureQA.inputStartupPermission = 'granted'
+          ses.captureQA.holdInputPrompt = false
+          ses.answerInputPrompt()
+        })
         await viewer.waitForFunction(() => document.querySelector('#permission-state').textContent.includes('可控制'))
         assert.equal(await liveTrack(),track)
+        assert(!(await readCaptureQA()).inputEvents.some(e => e.code === 'KeyV'))
+        await viewer.keyboard.press('KeyN')
+        await apps[0].evaluate(async ({session}) => {
+          for (let i=0; i<100; i++) {
+            if (session.defaultSession.captureQA.inputEvents.some(e => e.code === 'KeyN' && !e.down)) return
+            await new Promise(resolve => setTimeout(resolve,50))
+          }
+          throw Error('Input was not restored after the manual grant')
+        })
         await viewer.locator('#end-session').click()
         await code.waitFor({state:'visible'})
         assert.equal(await code.inputValue(),reconnectCode)
@@ -795,6 +856,7 @@ async function run() {
         await waitForVideo()
         await viewer.waitForFunction(() => document.querySelector('#permission-state').textContent.includes('可控制'))
         assert.equal((await readCaptureQA()).nativeStarts,recovered.nativeStarts)
+        assert.equal((await readCaptureQA()).manualInputAttempts,pending.manualInputAttempts)
         await stop()
         await setCaptureQA({inputPermission:'granted',inputStartupPermission:null,screenPermission:'granted',listFails:false,nativeDisplayId:900002})
         await fixture.waitForHostSlot()
@@ -806,7 +868,32 @@ async function run() {
         assert.equal((await readCaptureQA()).inputStarts,recovered.inputStarts+2)
         await stop()
         await setCaptureQA({nativeDisplayId:900001})
-        console.log('Verified saved-screen fallback, video despite Accessibility denial, in-place input recovery and revocation, and same-code reconnection with synthetic mouse, keyboard and JPEG frames.')
+        console.log('Verified view-only video after denial, a permission request from the input helper on a host click, input only after approval, revocation, and silent reconnection.')
+        // The settings dialog can observe a first grant while the underlying share is still view-only.
+        // Closing an in-app dialog is not a window-focus event.
+        await fixture.waitForHostSlot()
+        await setCaptureQA({inputPermission:'denied',inputStartupPermission:'denied'})
+        await host.locator('#host-options').click()
+        await host.locator('#allow-control').check()
+        await host.locator('#use-system-picker').click()
+        await connectWithCode()
+        await waitForVideo()
+        await viewer.waitForFunction(() => document.querySelector('#permission-state').textContent.includes('共享端需授权键鼠'))
+        const dialogTrack = await liveTrack()
+        await host.locator('#settings-button').click()
+        await host.locator('#settings-input-settings').waitFor()
+        await setCaptureQA({inputPermission:'granted',inputStartupPermission:'granted'})
+        await host.evaluate(() => window.dispatchEvent(new FocusEvent('focus')))
+        await waitForNotice('input-check-result','已获辅助功能授权')
+        const beforeClose = await readCaptureQA()
+        assert.match(await viewer.locator('#permission-state').innerText(),/共享端需授权键鼠/)
+        await host.evaluate(() => window.addEventListener('focus',window.qaSuppressFocus,true))
+        await host.locator('#close-settings').click()
+        await viewer.waitForFunction(() => document.querySelector('#permission-state').textContent.includes('可控制'),null,{timeout:6000})
+        assert.equal((await readCaptureQA()).inputStarts,beforeClose.inputStarts + 1)
+        assert.equal(await liveTrack(),dialogTrack)
+        await host.evaluate(() => window.removeEventListener('focus',window.qaSuppressFocus,true))
+        await stop()
         // If macOS ends its selected source before anyone joins, the
         // published invitation must go away along with the local capture.
         await fixture.waitForHostSlot()

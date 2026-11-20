@@ -405,7 +405,7 @@ function disableInput(active, message) {
     canRetry:hostOptedIntoInput(active), message:message === 'control-permission' ? inputPermissionMessage : active.controlError })
 }
 
-async function startHostInput(active) {
+async function startHostInput(active, requestAccess = false) {
   if (!hostOptedIntoInput(active) || active.input || localFiles.open) throw new Error('无法为所选显示器启用键鼠控制。')
   const input = active.input = new InputBridge()
   input.on('error', error => { if (active.input === input) disableInput(active,error.message) })
@@ -414,7 +414,7 @@ async function startHostInput(active) {
     await inputDrained
     if (!live() || localFiles.open) throw new Error('连接请求已失效。')
     // The process that posts events performs the final OS permission check.
-    await input.start(active.display, nativeOptions)
+    await input.start(active.display, {...nativeOptions, requestAccess})
     if (!live() || localFiles.open) throw new Error('连接请求已失效。')
     active.allowControl = true
     active.controlError = null
@@ -745,12 +745,12 @@ function registerHandlers() {
     active.captureGranted = true
     return active.allowControl
   })
-  handle('retry-input', async requestId => {
+  handle('retry-input', async (requestId, requestAccess) => {
     const active = current
     if (!approvedHost() || active.requestId !== requestId || !active.captureGranted || !hostOptedIntoInput(active)) {
       throw new Error('连接请求已失效。')
     }
-    if (!active.allowControl) await startHostInput(active)
+    if (!active.allowControl) await startHostInput(active, requestAccess === true)
     if (current !== active || !approvedHost() || !active.allowControl) throw new Error('连接请求已失效。')
     return {allowControl:true, nativeCursorEmbedded:active.nativeCapture?.bridge.showCursor}
   })

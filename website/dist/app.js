@@ -1,7 +1,7 @@
 'use strict';
 const messages = {
   'zh-CN': {
-    release: '0.4.13 预览版', category: '远程桌面', downloads: '下载',
+    release: '0.4.14 预览版', category: '远程桌面', downloads: '下载',
     macRequirements: 'macOS 13+ · Apple Silicon / Intel', winRequirements: 'Windows 10+ · x64',
     sourceCode: 'GitHub 开源', winFormat: '安装程序 · x64', updates: '可在应用内检查更新。Windows 安装程序会更新现有安装。',
     downloadMac: '下载 macOS', downloadWin: '下载 Windows', connectTitle: '如何连接',
@@ -10,13 +10,13 @@ const messages = {
     networkLan: '两端连接同一账号服务完成配对，可使用不同网络。',
     networkWan: '画面优先直连。严格 NAT 或防火墙可能需要 TURN 媒体中继。',
     networkStatus: '公共中继由管理员按额度启用。也可使用自己的 TURN 或可互访的 VPN。', releaseTitle: '版本说明',
-    releaseChanges: '被控 Mac 勾选键鼠控制后，从 CC Connect 打开「辅助功能」并首次授权，即可在原连接中启用键鼠。本版也修复了恢复控制后鼠标偶尔要先点击才能移动的问题。',
+    releaseChanges: '在被控 Mac 点「启用键鼠控制」后，键鼠组件可直接向 macOS 请求授权。设置中首次授权后，回到当前共享即可恢复控制。若仍无法启动，应用会显示本次检测结果。',
     releaseInfo: '支持简体中文、繁体中文与英文。macOS 包为本地签名，尚未公证。Windows 包尚未签名。',
     administration: '管理员登录后，点「用户管理」即可创建邀请码和审批账号。',
     privacy: '共享端可随时取消邀请或结束连接。具备本机屏幕、进程或网络观察权限的工具仍可能识别远控。'
   },
   'zh-TW': {
-    release: '0.4.13 預覽版', category: '遠端桌面', downloads: '下載',
+    release: '0.4.14 預覽版', category: '遠端桌面', downloads: '下載',
     macRequirements: 'macOS 13+ · Apple Silicon / Intel', winRequirements: 'Windows 10+ · x64',
     sourceCode: 'GitHub 開源', winFormat: '安裝程式 · x64', updates: '可在應用程式內檢查更新。Windows 安裝程式會更新現有安裝。',
     downloadMac: '下載 macOS', downloadWin: '下載 Windows', connectTitle: '如何連線',
@@ -25,13 +25,13 @@ const messages = {
     networkLan: '兩端連到相同帳號服務完成配對，可使用不同網路。',
     networkWan: '畫面優先直接連線。嚴格 NAT 或防火牆可能需要 TURN 媒體中繼。',
     networkStatus: '公共中繼由管理員按額度啟用。也可使用自己的 TURN 或可互連的 VPN。', releaseTitle: '版本說明',
-    releaseChanges: '受控 Mac 勾選鍵盤與滑鼠控制後，從 CC Connect 開啟「輔助使用」並首次授權，即可在目前的連線中啟用鍵盤與滑鼠。本版也修正了恢復控制後，滑鼠偶爾必須先點一下才能移動的問題。',
+    releaseChanges: '在受控 Mac 點選「啟用鍵鼠控制」後，鍵盤與滑鼠元件可直接向 macOS 要求授權。在設定中首次授權後，回到目前的共享即可恢復控制。若仍無法啟動，應用程式會顯示這次的檢測結果。',
     releaseInfo: '支援簡體中文、繁體中文與英文。macOS 套件為本機簽署，尚未經過公證。Windows 套件尚未簽署。',
     administration: '管理員登入後，點「使用者管理」即可建立邀請碼和核准帳號。',
     privacy: '分享端可隨時取消邀請或結束連線。具備本機螢幕、程序或網路觀察權限的工具仍可能辨識遠端控制。'
   },
   en: {
-    release: '0.4.13 Preview', category: 'Remote desktop', downloads: 'Downloads',
+    release: '0.4.14 Preview', category: 'Remote desktop', downloads: 'Downloads',
     macRequirements: 'macOS 13+ · Apple Silicon / Intel', winRequirements: 'Windows 10+ · x64',
     sourceCode: 'Open source on GitHub', winFormat: 'Installer · x64', updates: 'Check for updates in the app. The Windows installer updates your existing installation.',
     downloadMac: 'Get for Mac', downloadWin: 'Get for Windows', connectTitle: 'Connect your computers',
@@ -40,7 +40,7 @@ const messages = {
     networkLan: 'Both devices pair through the account service and can use different networks.',
     networkWan: 'Video uses a direct connection when possible. Strict NAT or firewall rules may require a TURN media relay.',
     networkStatus: 'An administrator can enable managed relay service within its budget. You can also use your own TURN relay or a VPN that connects both devices.', releaseTitle: 'Release notes',
-    releaseChanges: 'If keyboard and mouse control is enabled for a share, opening Accessibility settings from CC Connect on the host Mac and granting access for the first time activates control in the same session. This update also fixes a case where the pointer would move only after a click when control resumed.',
+    releaseChanges: 'On the sharing Mac, the Enable keyboard and mouse button now lets the input service request access directly from macOS. After granting access for the first time in Settings, close Settings to resume control in the same session. If the service still cannot start, CC Connect shows what the permission check found.',
     releaseInfo: 'Available in Simplified Chinese, Traditional Chinese and English. The macOS app is locally signed and awaits notarization. The Windows app is unsigned.',
     administration: 'Sign in as an administrator and choose Manage users to create invites or approve accounts.',
     privacy: 'The host can cancel an invitation or end a session at any time. Tools with permission to observe the screen, processes or network may still identify remote control.'

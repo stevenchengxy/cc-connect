@@ -21,12 +21,16 @@ if arguments == ["--request-access"] {
     reply(CGPreflightPostEventAccess() || CGRequestPostEventAccess() ? "ALLOWED" : "DENIED")
     exit(0)
 }
-guard arguments.count == 1, let display = CGDirectDisplayID(arguments[0]),
+let requestForSession = arguments.count == 2 && arguments[1] == "--request-access"
+guard arguments.count == 1 || requestForSession, let display = CGDirectDisplayID(arguments[0]),
       CGDisplayIsActive(display) != 0 else {
     fail("所选显示器不可用。")
 }
-guard CGPreflightPostEventAccess() else {
-    fail("control-permission")
+if !CGPreflightPostEventAccess() {
+    guard requestForSession else { fail("control-permission") }
+    // Ask from the same process that will post events, then verify its effective grant.
+    _ = CGRequestPostEventAccess()
+    guard CGPreflightPostEventAccess() else { fail("control-permission") }
 }
 guard let source = CGEventSource(stateID: .privateState) else {
     fail("无法创建系统输入会话。")
