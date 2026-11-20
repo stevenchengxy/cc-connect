@@ -4,16 +4,13 @@ const path = require('node:path');
 const { createInterface } = require('node:readline');
 const keyMaps = require('./keys.cjs');
 
-function binaryPath({ isPackaged, resourcesPath } = {}) {
+function binaryPath(filename, { isPackaged, resourcesPath } = {}) {
   const packaged = isPackaged ?? (__dirname.includes('app.asar' + path.sep));
   const root = packaged ? path.join(resourcesPath ?? process.resourcesPath, 'native') : __dirname;
-  return path.join(root, 'bin', process.platform === 'win32' ? 'jianping-input.exe' : 'jianping-input');
+  return path.join(root, 'bin', filename);
 }
 
 function displayArgs(display) {
-  if (process.platform === 'darwin' && Number.isSafeInteger(display?.id) && display.id > 0) {
-    return [String(display.id)];
-  }
   if (process.platform === 'win32' && display?.bounds) {
     const bounds = require('electron').screen.dipToScreenRect(null, display.bounds);
     const numbers = [bounds.x, bounds.y, bounds.width, bounds.height];
@@ -50,7 +47,108 @@ function encodeInput(data, platform = process.platform) {
   return null;
 }
 
-class InputBridge extends EventEmitter {
+function loadMacInput(options) {
+  return require(binaryPath('cc-mac-input.node', options));
+}
+
+// A permission dialog belongs to the application. Only the originating live
+// input session may act on its result. Other checks remain prompt-free.
+const permissionRequests = new WeakMap();
+function requestMacAccess(native) {
+  let pending = permissionRequests.get(native);
+  if (!pending) {
+    pending = Promise.resolve(native.access(true)).finally(() => permissionRequests.delete(native));
+    permissionRequests.set(native, pending);
+  }
+  return pending;
+}
+
+function waitForMacAccess(native, session) {
+  let timeout;
+  return new Promise((resolve, reject) => {
+    if (session) session.cancel = () => reject(new Error('键鼠授权已取消。'));
+    timeout = setTimeout(() => reject(new Error('键鼠服务启动超时。')), 120_000);
+    requestMacAccess(native).then(resolve, reject);
+  }).finally(() => {
+    clearTimeout(timeout);
+    if (session) session.cancel = null;
+  });
+}
+
+class MacInputBridge extends EventEmitter {
+  constructor(loadNative = loadMacInput) {
+    super();
+    this.loadNative = loadNative;
+    this.session = null;
+  }
+
+  static async macAccess(options, request = false, loadNative = loadMacInput) {
+    try {
+      const native = loadNative(options);
+      const allowed = native.access(false) || (request === true && await waitForMacAccess(native));
+      return allowed ? 'granted' : 'denied';
+    } catch {
+      return 'unknown';
+    }
+  }
+
+  async checkPermission(options) {
+    try { return this.loadNative(options).access(false); }
+    catch { return false; }
+  }
+
+  async start(display, options) {
+    if (this.session) throw new Error('已有键鼠控制会话。');
+    if (!Number.isSafeInteger(display?.id) || display.id <= 0 || display.id > 0xffffffff) {
+      throw new Error('无法为所选显示器启用键鼠控制。');
+    }
+    let native;
+    try { native = this.loadNative(options); }
+    catch { throw new Error('键鼠服务启动失败，请检查应用是否安装完整。'); }
+    const session = this.session = {native, ready:false, cancel:null};
+    try {
+      if (options?.requestAccess === true && !native.access(false)) {
+        await waitForMacAccess(native, session);
+        if (this.session !== session) throw new Error('键鼠授权已取消。');
+      }
+      // start() verifies the selected display and this process's effective access.
+      native.start(display.id);
+      session.ready = true;
+    } catch (error) {
+      if (this.session === session) this.session = null;
+      throw error;
+    }
+  }
+
+  send(data) {
+    const session = this.session;
+    if (!session?.ready) return false;
+    const line = encodeInput(data);
+    if (line === null) return false;
+    session.native.send(line);
+    return true;
+  }
+
+  recheckAccess() {
+    const session = this.session;
+    if (!session?.ready) return;
+    try { session.native.send('check-access'); }
+    catch (error) {
+      this.stop();
+      this.emit('error', error);
+    }
+  }
+
+  async stop() {
+    const session = this.session;
+    if (!session) return;
+    this.session = null;
+    session.cancel?.();
+    if (session.ready) session.native.stop();
+  }
+}
+
+class WindowsInputBridge extends EventEmitter {
   constructor() {
     super();
     this.session = null;
@@ -60,22 +158,11 @@ class InputBridge extends EventEmitter {
 
   async checkPermission(options) {
     if (!keyMaps[process.platform]) return false;
-    if (process.platform === 'darwin') return await InputBridge.macAccess(options) === 'granted';
     return new Promise(resolve => {
-      execFile(binaryPath(options), ['--check'], { timeout: 4000, windowsHide: true }, (err, stdout) => {
+      execFile(binaryPath('jianping-input.exe', options), ['--check'], { timeout: 4000, windowsHide: true }, (err, stdout) => {
         resolve(!err && stdout.trim() === 'ALLOWED');
       });
     });
-  }
-
-  static async macAccess(options, request = false) {
-    return new Promise(resolve => {
-      execFile(binaryPath(options), [request ? '--request-access' : '--check'], { timeout: request ? 30000 : 4000 },
-        (err, stdout) => {
-          const status = stdout?.trim()
-          resolve(!err && status === 'ALLOWED' ? 'granted' : !err && status === 'DENIED' ? 'denied' : 'unknown')
-        })
-    })
   }
 
   async start(display, options) {
@@ -85,9 +172,7 @@ class InputBridge extends EventEmitter {
     await this.closing;
     if (revision !== this.revision) throw new Error('键鼠授权已取消。');
     const args = displayArgs(display);
-    const requestAccess = process.platform === 'darwin' && options?.requestAccess === true;
-    if (requestAccess) args.push('--request-access');
-    const child = spawn(binaryPath(options), args, {
+    const child = spawn(binaryPath('jianping-input.exe', options), args, {
       stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true,
     });
     const session = { child, ready: false, stopping: false, message: '', closed: null };
@@ -105,12 +190,8 @@ class InputBridge extends EventEmitter {
       const timeout = setTimeout(() => {
         fail('键鼠服务启动超时。');
         this.stop();
-      }, requestAccess ? 120_000 : 6000);
+      }, 6000);
       lines.on('line', line => {
-        if (line === 'ACCESS OK') {
-          clearTimeout(session.accessTimer);
-          session.accessTimer = null;
-        }
         if (line.startsWith('ERROR ')) session.message = line.slice(6, 300);
         if (line === 'READY' && !settled && !session.stopping && this.session === session) {
           session.ready = true;
@@ -124,7 +205,6 @@ class InputBridge extends EventEmitter {
         // EPIPE races with process exit. The close handler reports the outcome.
       });
       child.once('close', () => {
-        clearTimeout(session.accessTimer);
         lines.close();
         if (this.session === session) this.session = null;
         if (!session.ready) {
@@ -176,19 +256,6 @@ class InputBridge extends EventEmitter {
     session.child.stdin.write(line + '\n', written);
   }
 
-  recheckAccess() {
-    const session = this.session;
-    if (process.platform !== 'darwin' || !session?.ready || session.stopping || session.accessTimer || !session.child.stdin.writable) return;
-    // Only the live, event-posting process can confirm its own effective permission.
-    session.accessTimer = setTimeout(() => {
-      if (this.session !== session || session.stopping) return;
-      this.stop();
-      this.emit('error', new Error('键鼠控制暂时不可用，已切换为仅观看。'));
-    }, 4000);
-    session.accessTimer.unref();
-    session.child.stdin.write('check-access\n');
-  }
-
   stop() {
     ++this.revision;
     const session = this.session;
@@ -196,7 +263,6 @@ class InputBridge extends EventEmitter {
     this.session = null;
     session.stopping = true;
     session.ready = false;
-    clearTimeout(session.accessTimer);
     // EOF also reaches the helper if the parent is killed. Each helper releases
     // exactly its own held inputs in the EOF path, including during startup.
     session.child.stdin.end();
@@ -207,4 +273,5 @@ class InputBridge extends EventEmitter {
   }
 }
 
-module.exports = { InputBridge, encodeInput };
+const InputBridge = process.platform === 'darwin' ? MacInputBridge : WindowsInputBridge;
+module.exports = { InputBridge, MacInputBridge, WindowsInputBridge, encodeInput };

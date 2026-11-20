@@ -390,7 +390,9 @@ function disableInput(active, message) {
   // If a working input grant is revoked, future viewers stay view-only until
   // the local host explicitly retries. A first-time refusal can be rechecked
   // on the next connection, under the host's original opt-in.
-  const retryOnReconnect = Boolean(active.share && !active.share.hadControl && message === 'control-permission')
+  const retryAfterGrant = message === 'control-permission' && !(active.share?.hadControl || active.hadControl)
+  const retryOnReconnect = Boolean(active.share && retryAfterGrant)
+  active.manualInputRetry = !retryAfterGrant
   if (active.share && !retryOnReconnect) active.share.selection.controlRequested = false
   active.allowControl = false
   active.nativeCapture?.bridge.restoreViewOnlyCursor()
@@ -401,7 +403,7 @@ function disableInput(active, message) {
   }
   if (active.phase === 'connected' || active.share) showSharingIndicator()
   send({ type:'control-unavailable', shareId:active.share?.id, requestId:active.requestId,
-    inputStatus:message === 'control-permission' ? 'denied' : 'unknown', retryOnReconnect,
+    inputStatus:message === 'control-permission' ? 'denied' : 'unknown', retryOnReconnect, retryAfterGrant,
     canRetry:hostOptedIntoInput(active), message:message === 'control-permission' ? inputPermissionMessage : active.controlError })
 }
 
@@ -413,10 +415,12 @@ async function startHostInput(active, requestAccess = false) {
   try {
     await inputDrained
     if (!live() || localFiles.open) throw new Error('连接请求已失效。')
-    // The process that posts events performs the final OS permission check.
+    // Only the active input backend can grant control for this display.
     await input.start(active.display, {...nativeOptions, requestAccess})
     if (!live() || localFiles.open) throw new Error('连接请求已失效。')
     active.allowControl = true
+    active.hadControl = true
+    active.manualInputRetry = false
     active.controlError = null
     if (active.share) {
       active.share.hadControl = true
@@ -512,10 +516,9 @@ function registerHandlers() {
     if (process.platform !== 'darwin') return null
     const status = await InputBridge.macAccess(nativeOptions, false)
     if (details !== true) return status
-    // Accessibility trust belongs to the main app. Only the input helper
-    // can report whether macOS actually lets it post keyboard and mouse events.
+    // Accessibility trust and Core Graphics event-posting access are checked for this app.
     let appTrusted = null
-    try { appTrusted = systemPreferences.isTrustedAccessibilityClient(false) } catch { /* Keep the helper result. */ }
+    try { appTrusted = systemPreferences.isTrustedAccessibilityClient(false) } catch { /* Keep the event-posting result. */ }
     return { status, appTrusted, appPath:runningMacBundlePath() }
   })
   handle('screen-status', async () => {
@@ -526,7 +529,8 @@ function registerHandlers() {
   handle('open-input-settings', async () => {
     if (process.platform !== 'darwin') throw new Error('control-permission')
     await shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility')
-    await InputBridge.macAccess({ resourcesPath: process.resourcesPath, isPackaged: app.isPackaged }, true)
+    // The settings window is open. Let the renderer observe effective access while macOS awaits a decision.
+    void InputBridge.macAccess(nativeOptions, true).catch(() => {})
   })
   handle('open-screen-settings', async () => {
     if (process.platform !== 'darwin') throw new Error('source-unavailable')
@@ -645,7 +649,7 @@ function registerHandlers() {
     active.choices = new ScreenChoices(sources, screen.getAllDisplays(), screen.getPrimaryDisplay().id, revision)
     return active.choices.options
   })
-  const selectSharing = async (allowControl, screenId, requestId, preparing) => {
+  const selectSharing = async (allowControl, screenId, requestId, preparing, requestAccess) => {
     const active = requireHostPhase(requestId, preparing ? 'preparing' : 'pending')
     active.phase = preparing ? 'selecting' : 'approving'
     try {
@@ -682,8 +686,17 @@ function registerHandlers() {
         if (!inputSupported || (active.captureMode !== 'native-display' && !active.display)) throw new Error('无法为所选显示器启用键鼠控制。')
         if (process.platform === 'darwin') {
           inputStatus = await InputBridge.macAccess(nativeOptions)
-          if (!preparing && inputStatus !== 'granted') {
-            throw new Error(inputStatus === 'denied' ? 'control-permission' : '无法检查键鼠组件，请确认已完整安装 CC Connect。')
+          if (inputStatus === 'denied' && requestAccess === true && !active.inputAccessRequested &&
+              current === active && active.token === account.approvedToken) {
+            // Only a local sharing gesture can ask. Retrying a different source or admitting another peer is silent.
+            active.inputAccessRequested = true
+            // Publishing the already approved video must not wait for the answer in System Settings.
+            // The renderer rechecks the current OS state; this notification is never an input grant.
+            void InputBridge.macAccess(nativeOptions, true).then(() => {
+              if (current === active && active.token === account.approvedToken && active.controlRequested && !active.manualInputRetry) {
+                send({type:'input-access-checked', requestId:active.requestId})
+              }
+            }).catch(() => {})
           }
         }
       }
@@ -706,8 +719,8 @@ function registerHandlers() {
       throw err
     }
   }
-  handle('select-sharing', (control, screenId, id) => selectSharing(control, screenId, id, true))
-  handle('accept', (control, screenId, id) => selectSharing(control, screenId, id, false))
+  handle('select-sharing', (control, screenId, id, requestAccess) => selectSharing(control, screenId, id, true, requestAccess))
+  handle('accept', (control, screenId, id, requestAccess) => selectSharing(control, screenId, id, false, requestAccess))
   handle('reject', requestId => {
     const active = requireHostPhase(requestId, 'pending')
     active.network.respond(false)
@@ -737,7 +750,7 @@ function registerHandlers() {
     if (active.controlRequested && (!native || active.display)) {
       try { await startHostInput(active) }
       catch (error) {
-        if (current !== active || !approvedHost() || !active.share) throw error
+        if (current !== active || !approvedHost() || (!active.share && error.message !== 'control-permission')) throw error
         // Keep the authorized video stream usable even if macOS allows only
         // screen capture. Input remains closed until its own grant succeeds.
       }
@@ -749,6 +762,9 @@ function registerHandlers() {
     const active = current
     if (!approvedHost() || active.requestId !== requestId || !active.captureGranted || !hostOptedIntoInput(active)) {
       throw new Error('连接请求已失效。')
+    }
+    if (!active.allowControl && requestAccess !== true && (active.manualInputRetry || !active.controlRequested)) {
+      throw new Error('请在共享端启用键鼠控制。')
     }
     if (!active.allowControl) await startHostInput(active, requestAccess === true)
     if (current !== active || !approvedHost() || !active.allowControl) throw new Error('连接请求已失效。')

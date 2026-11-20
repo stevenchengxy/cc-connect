@@ -297,6 +297,7 @@ function cleanRoom() {
   $('file-tools').hidden = true;
   cancelMove(); heldButtons.clear();
   clearInterval(previous.statsTimer);
+  clearTimeout(previous.initialInputTimer);
   clearTimeout(previous.connectTimer);
   clearTimeout(previous.lossTimer);
   clearTimeout(previous.grantTimer);
@@ -464,6 +465,7 @@ function showInvite(result, token) {
     label('host-help','公网配对暂不可用。此码仅限局域网或 VPN。');
     syncHome();
     setStatus('共享已开启 · 等待连接','live');
+    if (draft.choice?.control && draft.inputStatus === 'denied') void refreshInputPermission();
     return;
   }
   delete $('host-help').dataset.i18n;
@@ -492,7 +494,7 @@ function showInvite(result, token) {
   syncHome();
   if (phase === 'listening') setStatus('等待配对', 'pending');
 }
-async function openHost({files=false, configure=false} = {}) {
+async function openHost({files=false, configure=false, requestAccess=false} = {}) {
   if (phase !== 'idle' || account.status !== 'approved') return;
   const token = ++generation;
   phase = 'opening';
@@ -506,12 +508,12 @@ async function openHost({files=false, configure=false} = {}) {
       return;
     }
     const saved = savedSharing();
-    await requestConsent({requestId:id, fileSessions:true, preparing:true, saved, automatic:!!saved && !configure});
+    await requestConsent({requestId:id, fileSessions:true, preparing:true, saved, automatic:!!saved && !configure, requestAccess});
   } catch (e) {
     if (generation === token) await disconnect(describeError(e), true);
   }
 }
-$('host-button').onclick = () => openHost();
+$('host-button').onclick = event => openHost({requestAccess:event.isTrusted === true});
 $('host-files').onclick = () => openHost({files:true});
 $('host-options').onclick = () => openHost({configure:true});
 $('rotate-device-code').onclick = () => {
@@ -661,8 +663,8 @@ function renderScreenCheck() {
   $('settings-screen-settings').hidden = !needsRecordingSettings(check?.errorCode);
   const inputMessages = {
     granted:'键鼠控制已获辅助功能授权。',
-    denied:inputPermission?.appTrusted === true ? '当前应用已获辅助功能授权，但 macOS 仍未允许键鼠组件发送输入。' : 'macOS 尚未允许当前运行的应用控制键鼠。',
-    unknown:'无法检查键鼠组件，请确认已完整安装 CC Connect。'
+    denied:inputPermission?.appTrusted === true ? '辅助功能已开启，但 macOS 仍未允许 CC Connect 发送键鼠事件。' : 'macOS 尚未允许当前运行的应用控制键鼠。',
+    unknown:'无法检查 CC Connect 的键鼠权限，请确认应用已完整安装。'
   };
   const inputMessage = info.platform === 'darwin' ? inputMessages[inputPermission?.status] :
     info.inputSupported ? '在共享请求中允许键鼠控制。' : '本机仅支持观看。';
@@ -945,27 +947,27 @@ async function requestConsent(event) {
     // This source was approved in the OS picker. Reopen it directly on the
     // host's Start gesture, even when desktopCapturer cannot enumerate screens.
     usePickerInsteadOfList(true);
-    await acceptScreen(true);
+    await acceptScreen(true,event.requestAccess === true);
   } else {
     await readConsentScreens(!!(preparing && event.saved?.mode === 'screen'));
     if (!event.automatic || !currentRequest(request)) return;
-    if (request.matched && !$('accept').disabled) await acceptScreen(false);
+    if (request.matched && !$('accept').disabled) await acceptScreen(false,event.requestAccess === true);
     // When a saved display disappeared, the OS picker lets the host select
     // its replacement. A view-only fallback needs explicit confirmation if
     // the saved preference requested control.
     if (currentRequest(request) && !request.matched && !$('use-system-picker').hidden &&
         (info.canUseNativeScreenPicker || !event.saved.control)) {
-      await acceptScreen(true);
+      await acceptScreen(true,event.requestAccess === true);
     }
   }
   if (currentRequest(request) && !$('consent').open) $('consent').showModal();
 }
 $('retry-screens').onclick = () => readConsentScreens(true);
-async function publishSelection(request, source, control) {
+async function publishSelection(request, source, control, requestAccess = false) {
   const draft = preparedHost;
   const live = () => preparedHost === draft && generation === request.generation && !['idle','closing'].includes(phase);
   if (!draft || draft.id !== request.id || !live()) throw new Error('连接请求已失效。');
-  const selection = await api.selectSharing(control,source,request.id);
+  const selection = await api.selectSharing(control,source,request.id,requestAccess);
   draft.inputStatus = control ? selection?.inputStatus : undefined;
   const mode = ['native-display','system-picker','files'].includes(source) ? source : 'screen';
   const choice = {mode,control,name:'',displayId:''};
@@ -1002,9 +1004,10 @@ async function publishSelection(request, source, control) {
   draft.continuous = mode !== 'files';
   draft.requestId = request.id;
   // A returning viewer may already know the fixed address and claim it before
-  // the publish response arrives. Save exactly what the host authorized first.
+  // the publish response arrives. Keep the display's live capability separate
+  // from the checkbox preference for the host's next local share.
   if (mode !== 'files') {
-    try { localStorage.setItem('cc-share:' + account.username, JSON.stringify(choice)); } catch {}
+    try { localStorage.setItem('cc-share:' + account.username, JSON.stringify({...choice,control})); } catch {}
   }
   if ($('consent').open) $('consent').close();
   pendingRequest = null;
@@ -1018,7 +1021,7 @@ async function publishSelection(request, source, control) {
     if (live()) await disconnect(describeError(error), true);
   }
 }
-async function acceptScreen(usePicker) {
+async function acceptScreen(usePicker, requestAccess = false) {
   const request = pendingRequest;
   if (!currentRequest(request) || request.busy || request.approving || request.requestedFiles) return;
   if (usePicker ? $('use-system-picker').hidden : !$('screens').value || $('accept').disabled) return;
@@ -1032,8 +1035,12 @@ async function acceptScreen(usePicker) {
   try {
     const source = usePicker ? (info.canUseNativeScreenPicker ? 'native-display' : 'system-picker') : $('screens').value;
     const control = source !== 'system-picker' && $('allow-control').checked;
-    if (request.preparing) await publishSelection(request,source,control);
-    else await api.accept(control,source,request.id);
+    if (control && info.platform === 'darwin') {
+      if ($('consent').open) notice('consent-notice','正在检查键鼠权限…');
+      else setStatus('正在检查键鼠权限…','pending');
+    }
+    if (request.preparing) await publishSelection(request,source,control,requestAccess);
+    else await api.accept(control,source,request.id,requestAccess);
   } catch (e) {
     if (!currentRequest(request)) return;
     const message = describeError(e);
@@ -1061,7 +1068,11 @@ $('consent-form').onsubmit = (event) => {
   event.preventDefault();
   void acceptScreen(false);
 };
-$('use-system-picker').onclick = () => acceptScreen(true);
+$('accept').onclick = event => {
+  event.preventDefault();
+  void acceptScreen(false,event.isTrusted === true);
+};
+$('use-system-picker').onclick = event => acceptScreen(true,event.isTrusted === true);
 $('accept-files').onclick = async () => {
   const request = pendingRequest;
   if (!currentRequest(request) || !request.fileSessions || request.approving) return;
@@ -1096,20 +1107,47 @@ const viewOnlyLabels = {
   off:'仅观看 · 共享端未开启键鼠',
   permission:'仅观看 · 共享端需授权键鼠',
   display:'仅观看 · 此画面不支持键鼠',
+  starting:'仅观看 · 共享端正在启用键鼠',
   unavailable:'仅观看 · 等待共享端启用键鼠'
 };
 function hostViewOnlyReason(value) {
   if (value.filesOnly || value.allowControl) return undefined;
   if (value.systemPicker || value.nativeCapture?.matched === false) return 'display';
   if (!value.controlRequested && !value.canRetryInput) return 'off';
+  if (value.retryingInput) return 'starting';
   if (value.inputStatus === 'denied') return 'permission';
   return value.captureReady ? 'unavailable' : undefined;
 }
+function watchFirstInputGrant(value) {
+  if (info.platform !== 'darwin' || value.role !== 'host' || !value.captureReady || !value.canRetryInput ||
+      !value.retryAfterGrant || value.allowControl) {
+    clearTimeout(value.initialInputTimer);
+    value.initialInputTimer = null;
+    value.initialInputDelay = 0;
+    return;
+  }
+  if (value.initialInputTimer) return;
+  value.initialInputDelay = Math.min(30_000, (value.initialInputDelay || 1500) * 2);
+  const timer = value.initialInputTimer = setTimeout(async () => {
+    try {
+      // System Settings can stay in front after a grant. A focus notification is optional.
+      if (isCurrent(value) && !value.retryingInput && !$('settings-dialog').open) await refreshInputPermission(true);
+    } finally {
+      if (value.initialInputTimer === timer) {
+        value.initialInputTimer = null;
+        if (isCurrent(value)) watchFirstInputGrant(value);
+      }
+    }
+  }, value.initialInputDelay);
+}
 function showPermission(value) {
   if (!isCurrent(value)) return;
+  watchFirstInputGrant(value);
   $('input-recovery').hidden = !(value.role === 'host' && value.canRetryInput && value.captureReady && !value.allowControl);
   $('session-input-settings').hidden = info.platform !== 'darwin' || value.inputStatus !== 'denied';
   $('retry-input').disabled = value.retryingInput === true;
+  $('retry-input').ariaBusy = String(value.retryingInput === true);
+  label('retry-input',value.retryingInput ? '正在启用键鼠控制…' : '启用键鼠控制');
   if (value.role === 'viewer') {
     $('remote-video').toggleAttribute('data-embedded-pointer',value.allowControl && value.embeddedPointer === true);
   }
@@ -1137,7 +1175,7 @@ function controlUnavailable(value, message, details = {}) {
     }).catch(() => {});
   }
   if (details.inputStatus) value.inputStatus = details.inputStatus;
-  value.retryAfterGrant = details.retryOnReconnect === true;
+  value.retryAfterGrant = details.retryAfterGrant === true;
   if (details.canRetry !== undefined) value.canRetryInput = details.canRetry;
   value.allowControl = false;
   sharePermission(value);
@@ -1148,7 +1186,8 @@ async function retryHostInput(value, requestAccess = false) {
   if (value?.role !== 'host' || !value.canRetryInput || !value.captureReady || value.allowControl || value.retryingInput) return;
   const revision = value.inputRevision;
   value.retryingInput = true;
-  showPermission(value);
+  if (requestAccess) notice('session-notice','正在启用键鼠控制…');
+  sharePermission(value);
   try {
     const result = await api.retryInput(value.requestId,requestAccess);
     if (!isCurrent(value) || revision !== value.inputRevision || result?.allowControl !== true) return;
@@ -1174,9 +1213,9 @@ async function retryHostInput(value, requestAccess = false) {
       if (!isCurrent(value) || value.allowControl || !value.canRetryInput || (value.inputRevision !== revision && !ownDenial)) return;
       const status = report?.status || 'unknown';
       if (status === 'granted') {
-        message = '键鼠权限检测已通过，但 macOS 在本次启动时拒绝了键鼠组件。请退出并重新打开这台 Mac 上的 CC Connect，再开启共享。';
+        message = '键鼠权限检测已通过，但本次启用键鼠时 macOS 拒绝了请求。请退出并重新打开这台 Mac 上的 CC Connect，再开启共享。';
       } else if (status === 'denied' && report.appTrusted === true) {
-        message = 'CC Connect 已获辅助功能授权，但 macOS 拒绝了键鼠组件。请退出并重新打开共享端的 CC Connect，再开启共享。';
+        message = '辅助功能已开启，但 macOS 仍未允许 CC Connect 发送键鼠事件。请退出并重新打开共享端的 CC Connect，再开启共享。';
       } else if (status === 'denied') {
         message = '请在系统设置的「隐私与安全性 → 辅助功能」中允许 CC Connect 控制键鼠。';
       } else {
@@ -1190,7 +1229,7 @@ async function retryHostInput(value, requestAccess = false) {
     notice('session-notice',message,true);
   } finally {
     value.retryingInput = false;
-    if (isCurrent(value)) showPermission(value);
+    if (isCurrent(value)) sharePermission(value);
   }
 }
 function setQuality(id) {
@@ -1841,6 +1880,10 @@ window.addEventListener('pagehide',() => { resetInput(); stopPreparedStream(); c
 
 async function handleEvent(event) {
   switch (event.type) {
+    case 'input-access-checked':
+      if (preparedHost?.requestId === event.requestId && phase === 'listening') void refreshInputPermission();
+      else if (room?.role === 'host' && room.requestId === event.requestId && room.retryAfterGrant) void refreshInputPermission(true);
+      break;
     case 'share-waiting': showShareWaiting(event); break;
     case 'share-ready':
       if (preparedHost?.continuous && preparedHost.id === event.shareId) showInvite(event,preparedHost.generation);

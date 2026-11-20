@@ -54,7 +54,79 @@ function installSyntheticPicker(ses,qa) {
   }
 }
 
+// Replace the OS boundary only. Session cancellation, rechecking, input encoding
+// and the difference between a preflight result and an actual start stay real.
+function installSyntheticInput(ses, qa) {
+  const bindings = require('../../native/bridge.cjs')
+  if (process.platform !== 'darwin') {
+    bindings.InputBridge.prototype.start = async function() { qa.inputAttempts++; qa.inputStarts++ }
+    bindings.InputBridge.prototype.send = data => { qa.inputEvents.push(data); return true }
+    return
+  }
+  let active = false, starting = false, posted = 0
+  const granted = () => (qa.inputStartupPermission ?? qa.inputPermission) === 'granted'
+  const native = {
+    access(prompt) {
+      if (!prompt) { qa.inputChecks++; return qa.inputPermission === 'granted' }
+      qa.inputPrompts++
+      if (starting) qa.sessionInputPrompts++
+      if (!qa.holdInputPrompt) return Promise.resolve(qa.inputPermission === 'granted')
+      return new Promise(resolve => { ses.answerInputPrompt = () => {
+        delete ses.answerInputPrompt
+        resolve(qa.inputPermission === 'granted')
+      } })
+    },
+    start(displayId) {
+      if (displayId !== 900001) throw Error('所选显示器不可用。')
+      if (!granted()) throw Error('control-permission')
+      if (active) throw Error('已有键鼠控制会话。')
+      active = true
+      qa.inputStarts++
+    },
+    send(line) {
+      if (!active || !granted()) throw Error('control-permission')
+      if (line !== 'check-access') posted++
+    },
+    stop() { active = false }
+  }
+  bindings.InputBridge = class extends bindings.MacInputBridge {
+    constructor() { super(() => native) }
+    static macAccess(options,request) {
+      return super.macAccess(options,request,() => {
+        if (qa.inputPermission === 'unknown') throw Error('Simulated diagnostic read failure')
+        return native
+      })
+    }
+    start(display,options) {
+      qa.inputAttempts++
+      if (options?.requestAccess === true) qa.manualInputAttempts++
+      ses.qaInputBridge = this
+      starting = true
+      try { return super.start(display,options) }
+      finally { starting = false }
+    }
+    send(data) {
+      const before = posted
+      const sent = super.send(data)
+      if (posted > before) qa.inputEvents.push(data)
+      return sent
+    }
+  }
+}
+
 app.whenReady().then(async () => {
+  if (process.argv.includes('--mac-input-smoke')) {
+    const assert = require('node:assert/strict')
+    const native = require('../../native/bin/cc-mac-input.node')
+    assert.equal(process.type,'browser')
+    assert.equal(typeof native.access(false),'boolean')
+    assert.throws(() => native.start(0))
+    native.stop()
+    native.stop()
+    console.log('Loaded the actual Mac input addon in Electron main; silent permission check, invalid display and idempotent stop passed.')
+    app.exit(0)
+    return
+  }
   const ses = session.defaultSession
   const captureQA = ses.captureQA = {screenPermission:'granted',listCalls:0,listFails:false,noDisplays:false,
     pickerCalls:0,cancelPicker:false,inputPermission:'granted',appTrusted:true,inputStartupPermission:null,inputChecks:0,inputPrompts:0,inputSettingsOpened:0,inputAttempts:0,inputStarts:0,inputEvents:[],
@@ -99,12 +171,7 @@ app.whenReady().then(async () => {
   if (fixture) {
     // No test input is injected into the operating system. The fixture
     // records the operations that reach the host's real session input gate.
-    const {InputBridge} = require('../../native/bridge.cjs')
-    InputBridge.macAccess = async (_options, request = false) => {
-      if (request) captureQA.inputPrompts++
-      else captureQA.inputChecks++
-      return captureQA.inputPermission
-    }
+    installSyntheticInput(ses,captureQA)
     systemPreferences.isTrustedAccessibilityClient = prompt => {
       if (prompt !== false) captureQA.inputPrompts++
       return captureQA.appTrusted
@@ -115,26 +182,7 @@ app.whenReady().then(async () => {
       captureQA.inputSettingsOpened++
       // Never open the operator's System Settings during an automated test.
     }
-    InputBridge.prototype.start = async function(display, options = {}) {
-      captureQA.inputAttempts++
-      if (options.requestAccess === true) captureQA.manualInputAttempts++
-      if (display.id !== 900001) throw Error('所选显示器不可用。')
-      const granted = () => (captureQA.inputStartupPermission ?? captureQA.inputPermission) === 'granted'
-      if (!granted() && options.requestAccess === true) {
-        captureQA.sessionInputPrompts++
-        if (captureQA.holdInputPrompt) {
-          await new Promise(resolve => { ses.answerInputPrompt = resolve })
-          delete ses.answerInputPrompt
-        }
-      }
-      if (!granted()) throw Error('control-permission')
-      captureQA.inputStarts++
-      ses.qaInputBridge = this
-    }
-    InputBridge.prototype.recheckAccess = function() {
-      if ((captureQA.inputStartupPermission ?? captureQA.inputPermission) !== 'granted') this.emit('error',Error('control-permission'))
-    }
-    InputBridge.prototype.send = data => { captureQA.inputEvents.push(data); return true }
+
   }
   ses.setDisplayMediaRequestHandler = (handler, options) => setHandler((request, reply) => {
     if (options?.useSystemPicker) {
@@ -162,4 +210,4 @@ app.whenReady().then(async () => {
     await source.loadFile(path.join(__dirname, 'source.html'))
   }
   require('../../src/main.cjs')
-})
+}).catch(error => { console.error(error); app.exit(1) })

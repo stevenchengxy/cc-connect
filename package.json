@@ -1,6 +1,6 @@
 {
   "name": "cc-connect",
-  "version": "0.4.14",
+  "version": "0.4.15",
   "description": "CC Connect remote desktop",
   "author": "CC Connect",
   "private": true,
@@ -42,7 +42,7 @@
       "category": "public.app-category.utilities",
       "icon": "build/icon.icns",
       "signIgnore": [
-        "/Contents/Resources/native/bin/jianping-input$",
+        "/Contents/Resources/native/bin/cc-mac-input[.]node$",
         "/Contents/Resources/native/bin/CC Connect Screen\\.app(?:/|$)"
       ],
       "extraResources": [
@@ -50,8 +50,8 @@
           "from": "native/bin",
           "to": "native/bin",
           "filter": [
-            "**/*",
-            "!**/*.exe"
+            "cc-mac-input.node",
+            "CC Connect Screen.app/**/*"
           ]
         },
         {

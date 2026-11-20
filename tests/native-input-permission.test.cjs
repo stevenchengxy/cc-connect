@@ -3,91 +3,114 @@
 const {test} = require('node:test')
 const assert = require('node:assert/strict')
 const {once} = require('node:events')
-const fs = require('node:fs/promises')
-const os = require('node:os')
-const path = require('node:path')
-const {InputBridge} = require('../native/bridge.cjs')
+const {MacInputBridge,WindowsInputBridge} = require('../native/bridge.cjs')
 
-async function fakeHelper(t, lines) {
-  const resourcesPath = await fs.mkdtemp(path.join(os.tmpdir(),'cc-input-permission-'))
-  const dir = path.join(resourcesPath,'native','bin')
-  await fs.mkdir(dir,{recursive:true})
-  // This private executable accepts only test permission queries, never input.
-  await fs.writeFile(path.join(dir,'jianping-input'), ['#!/bin/sh', ...lines].join('\n') + '\n',{mode:0o700})
-  const bridge = new InputBridge()
-  t.after(async () => { await bridge.stop(); await fs.rm(resourcesPath,{force:true,recursive:true}) })
-  return {bridge,options:{resourcesPath,isPackaged:true}}
-}
-
-async function fixture(t, onCheck) {
-  const {bridge,options} = await fakeHelper(t, [
-    'if [ "$1" = "--check" ]; then echo DENIED; exit 0; fi', 'echo READY',
-    'while IFS= read -r line; do', '  [ "$line" = "check-access" ] || exit 2', ...onCheck, 'done'
-  ])
-  assert.equal(await InputBridge.macAccess(options),'denied')
-  await bridge.start({id:123}, options)
-  return bridge
-}
-
-test('only explicit Mac starts ask from the event-posting helper', {skip:process.platform !== 'darwin'}, async t => {
-  const {bridge,options} = await fakeHelper(t, [
-    'if [ "$#" != 2 ] || [ "$1" != 123 ] || [ "$2" != "--request-access" ]; then',
-    '  echo "ERROR control-permission"; exit 1', 'fi', 'echo READY', 'while IFS= read -r line; do exit 2; done'
-  ])
-  for (const requestAccess of [undefined,false,'true']) {
-    await assert.rejects(bridge.start({id:123},{...options,requestAccess}), /control-permission/)
+function fixture() {
+  const state = {allowed:false, prompts:0, starts:0, stops:0, commands:[]}
+  const native = {
+    access(request) {
+      if (!request) return state.allowed
+      state.prompts++
+      return state.answer?.promise ?? Promise.resolve(state.allowed)
+    },
+    start(displayId) {
+      assert.equal(displayId,123)
+      if (!state.allowed) throw Error('control-permission')
+      state.starts++
+    },
+    send(line) {
+      if (!state.allowed) throw Error('control-permission')
+      state.commands.push(line)
+    },
+    stop() { state.stops++ }
   }
-  await bridge.start({id:123},{...options,requestAccess:true})
-  assert.equal(bridge.session.ready,true)
+  const load = () => native
+  return {bridge:new MacInputBridge(load),load,native,state}
+}
+
+test('Mac diagnostics, manual access and event posting use the same native permission state', async () => {
+  const {bridge,load,state} = fixture()
+  assert.equal(await MacInputBridge.macAccess({},false,load),'denied')
+  assert.equal(await bridge.checkPermission({}),false)
+  for (const requestAccess of [false,undefined,'true']) {
+    await assert.rejects(bridge.start({id:123},{requestAccess}),/control-permission/)
+  }
+  assert.equal(state.prompts,0)
+  state.answer = Promise.withResolvers()
+  const diagnostic = MacInputBridge.macAccess({},true,load)
+  const started = bridge.start({id:123},{requestAccess:true})
+  assert.equal(state.prompts,1,'The session and the settings query join one pending OS request')
+  assert.equal(bridge.send({kind:'reset'}),false)
+  state.allowed = true
+  state.answer.resolve(true)
+  await started
+  assert.equal(await diagnostic,'granted')
+  assert.equal(await MacInputBridge.macAccess({},true,load),'granted')
+  assert.equal(state.prompts,1)
+  assert.ok(bridge.send({kind:'reset'}))
+  assert.deepEqual(state.commands,['reset'])
   await bridge.stop()
-  await assert.rejects(bridge.start({id:123},options), /control-permission/)
+  await bridge.stop()
+  assert.equal(state.stops,1)
+  assert.equal(bridge.send({kind:'reset'}),false)
 })
 
-test('a pending permission prompt cannot enable control after cancellation or timeout', {skip:process.platform !== 'darwin'}, async t => {
+test('an explicit request cannot grant control if the actual start still fails', async () => {
+  const {bridge,state} = fixture()
+  state.answer = Promise.withResolvers()
+  const started = bridge.start({id:123},{requestAccess:true})
+  const denied = assert.rejects(started,/control-permission/)
+  state.answer.resolve(true)
+  await denied
+  assert.equal(bridge.session,null)
+  assert.equal(bridge.send({kind:'reset'}),false)
+  assert.equal(state.starts,0)
+})
+
+test('cancelling or timing out a pending Mac prompt leaves the next session in control', async t => {
   t.mock.timers.enable({apis:['setTimeout']})
-  const {bridge,options} = await fakeHelper(t, [
-    'echo PROMPT', 'while IFS= read -r line; do exit 2; done',
-    'echo READY' // Simulate a late grant as the cancelled parent closes the pipe.
-  ])
   for (const timeout of [false,true]) {
-    const started = bridge.start({id:123},{...options,requestAccess:true})
-    await Promise.resolve()
-    assert.equal(String((await once(bridge.session.child.stdout,'data'))[0]).trim(),'PROMPT')
+    const {bridge,state,load} = fixture()
+    state.answer = Promise.withResolvers()
+    const started = bridge.start({id:123},{requestAccess:true})
+    const rejected = assert.rejects(started,timeout ? /超时/ : /取消/)
     t.mock.timers.tick(6001)
-    assert.equal(bridge.session.ready,false)
     assert.equal(bridge.send({kind:'reset'}),false)
-    const rejected = assert.rejects(started,timeout ? /启动超时/ : /已取消/)
     if (timeout) t.mock.timers.tick(114000)
-    await bridge.stop()
+    else await bridge.stop()
     await rejected
     assert.equal(bridge.session,null)
+    state.allowed = true
+    const next = new MacInputBridge(load)
+    await next.start({id:123},{})
+    state.answer.resolve(true)
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(state.starts,1)
+    assert.equal(state.stops,0)
+    assert.equal(bridge.send({kind:'reset'}),false)
+    assert.ok(next.send({kind:'reset'}))
+    await next.stop()
+    assert.equal(state.stops,1)
   }
 })
 
-test('recheck uses the working input process and reports its actual revocation', {skip:process.platform !== 'darwin'}, async t => {
-  const bridge = await fixture(t, [
-    'if [ -z "$checked" ]; then checked=1; echo "ACCESS OK"; else echo "ERROR control-permission"; exit 1; fi'
-  ])
-  const first = once(bridge.session.child.stdout,'data')
+test('revocation detected by the active Mac addon closes the input gate', async () => {
+  const {bridge,state} = fixture()
+  state.allowed = true
+  await bridge.start({id:123},{})
   bridge.recheckAccess()
-  assert.equal(String((await first)[0]).trim(),'ACCESS OK')
-  const error = once(bridge,'error')
+  assert.deepEqual(state.commands,['check-access'])
+  state.allowed = false
+  const denied = once(bridge,'error')
   bridge.recheckAccess()
-  assert.equal((await error)[0].message,'control-permission')
-  assert.equal(bridge.session,null)
-  bridge.recheckAccess()
-})
-
-test('an unresponsive input helper closes as unavailable, distinct from a denied grant', {skip:process.platform !== 'darwin'}, async t => {
-  const bridge = await fixture(t, [':'])
-  const error = once(bridge,'error')
-  bridge.recheckAccess()
-  assert.match((await error)[0].message,/仅观看/)
-  assert.equal(bridge.session,null)
+  assert.equal((await denied)[0].message,'control-permission')
+  assert.equal(bridge.send({kind:'reset'}),false)
+  assert.equal(state.stops,1)
+  assert.equal(state.prompts,0)
 })
 
 test('a burst of pointer positions keeps the last move, preserves key order and never replays a move after a click', () => {
-  const bridge = new InputBridge()
+  const bridge = new WindowsInputBridge()
   const writes = [], callbacks = []
   const stdin = { writable:true, writableLength:0, write(line, callback) {
     writes.push(line.trim())

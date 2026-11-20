@@ -4,7 +4,7 @@ const path = require('node:path')
 const os = require('node:os')
 const fs = require('node:fs/promises')
 const { setTimeout: delay } = require('node:timers/promises')
-const { spawn } = require('node:child_process')
+const { execFileSync, spawn } = require('node:child_process')
 const { randomBytes } = require('node:crypto')
 
 const publicIceOnly = process.argv.includes('--public-ice-only')
@@ -95,6 +95,15 @@ async function verifyFileExchange(apps, pages, temp) {
 }
 
 async function run() {
+  if (process.argv.includes('--mac-input-smoke')) {
+    if (process.platform !== 'darwin') throw Error('The Mac input addon requires macOS')
+    const profile = await fs.mkdtemp(path.join(os.tmpdir(),'cc-mac-input-smoke-'))
+    try {
+      execFileSync(require('electron'),[path.join(__dirname,'fixtures/desktop.cjs'),'--mac-input-smoke','--user-data-dir='+profile],
+        {stdio:'inherit',timeout:30000})
+    } finally { await fs.rm(profile,{force:true,recursive:true}) }
+    return
+  }
   if (bothDirections && (wan || loopbackRelay)) throw Error('--both-directions requires the isolated local fixture')
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'jianping-e2e-'))
   const apps = []
@@ -384,7 +393,7 @@ async function run() {
       assert.equal(await host.evaluate(() => window.jianping.inputStatus()),'denied')
       assert.deepEqual(await host.evaluate(() => window.jianping.inputStatus(true)),{status:'denied',appTrusted:true,appPath})
       await host.locator('#settings-button').click()
-      await waitForNotice('input-check-result','仍未允许键鼠组件发送输入')
+      await waitForNotice('input-check-result','仍未允许 CC Connect 发送键鼠事件')
       assert((await host.locator('#checked-app-path').innerText()).includes(appPath))
       assert(await host.locator('#checked-app-path').isVisible())
       assert.equal((await readCaptureQA()).listCalls,before.listCalls)
@@ -696,13 +705,16 @@ async function run() {
         assert.equal((await readCaptureQA()).nativeActive,0)
         // Reproduce a saved, control-enabled Mac share. The screen list and
         // Accessibility preflight both fail. The user can still select a
-        // screen and a denied input helper cannot receive remote events.
+        // screen while the unapproved Mac input service stays inactive.
         await fixture.waitForHostSlot()
         await setCaptureQA({screenPermission:'denied',inputPermission:'denied',inputStartupPermission:'denied'})
         const beforeDenied = await readCaptureQA()
         await hostButton.click()
         await code.waitFor({state:'visible'})
-        assert.equal((await readCaptureQA()).nativeStarts,beforeDenied.nativeStarts+1)
+        const preparedDenied = await readCaptureQA()
+        assert.equal(preparedDenied.nativeStarts,beforeDenied.nativeStarts+1)
+        assert.equal(preparedDenied.inputPrompts,beforeDenied.inputPrompts+1,'Starting the saved control-enabled share may ask once on the host click')
+        assert.equal(preparedDenied.inputStarts,beforeDenied.inputStarts)
         await setCaptureQA({inputPermission:'granted'})
         await host.evaluate(() => window.dispatchEvent(new FocusEvent('focus')))
         await waitForNotice('host-scope','允许键鼠控制')
@@ -721,6 +733,7 @@ async function run() {
         assert.equal(denied.inputAttempts,beforeDenied.inputAttempts+1)
         assert.equal(denied.inputStarts,beforeDenied.inputStarts)
         assert.equal(denied.inputEvents.length,beforeDenied.inputEvents.length)
+        assert.equal(denied.inputPrompts,preparedDenied.inputPrompts,'A viewer connecting must never ask for permission')
         assert.equal(denied.manualInputAttempts,beforeDenied.manualInputAttempts)
         assert.equal(denied.sessionInputPrompts,beforeDenied.sessionInputPrompts)
         const liveTrack = () => viewer.locator('#remote-video').evaluate(v => v.srcObject.getVideoTracks()[0].id)
@@ -735,9 +748,9 @@ async function run() {
         assert.equal(scriptedRetry.manualInputAttempts,denied.manualInputAttempts,'A scripted click must stay silent')
         assert.equal(scriptedRetry.sessionInputPrompts,denied.sessionInputPrompts)
         for (const [inputPermission,appTrusted,reason,peer] of [
-          ['granted',true,'键鼠权限检测已通过','等待共享端启用键鼠'],
+          ['granted',true,'本次启用键鼠时 macOS 拒绝了请求','等待共享端启用键鼠'],
           ['unknown',true,'查看「键盘与鼠标」','等待共享端启用键鼠'],
-          ['denied',true,'macOS 拒绝了键鼠组件','共享端需授权键鼠'],
+          ['denied',true,'仍未允许 CC Connect 发送键鼠事件','共享端需授权键鼠'],
           ['denied',false,'辅助功能」中允许 CC Connect','共享端需授权键鼠']
         ]) {
           await setCaptureQA({inputPermission,appTrusted})
@@ -748,26 +761,24 @@ async function run() {
           await viewer.waitForFunction(peer => document.querySelector('#permission-state').textContent === '仅观看 · ' + peer,peer)
           const refused = await readCaptureQA()
           assert.equal(refused.inputStarts,denied.inputStarts)
-          assert.equal(refused.sessionInputPrompts,beforeRetry.sessionInputPrompts + 1)
+          assert.equal(refused.sessionInputPrompts,beforeRetry.sessionInputPrompts + Number(inputPermission !== 'granted'))
           assert.equal(refused.inputEvents.length,denied.inputEvents.length)
         }
         // Keep the host window unfocused while the user grants access in System Settings.
-        // The fixture records the settings action without opening any real system UI.
+        // Change only the synthetic OS grant; leave all app dialogs closed.
         await host.evaluate(() => {
           window.qaSuppressFocus = event => event.stopImmediatePropagation()
           window.addEventListener('focus',window.qaSuppressFocus,true)
         })
-        const beforeSettings = await readCaptureQA()
-        await host.locator('#session-input-settings').click()
-        await host.waitForFunction(() => Boolean(inputSettingsWatch?.timer))
+        const beforeGrant = await readCaptureQA()
         await setCaptureQA({inputPermission:'granted',inputStartupPermission:'granted'})
-        await viewer.waitForFunction(() => document.querySelector('#permission-state').textContent.includes('可控制'),null,{timeout:15000})
-        const afterSettings = await readCaptureQA()
-        assert.equal(afterSettings.inputPrompts,beforeSettings.inputPrompts + 1)
-        assert.equal(afterSettings.inputSettingsOpened,beforeSettings.inputSettingsOpened + 1)
-        assert(afterSettings.inputChecks >= beforeSettings.inputChecks + 2,'The host must silently observe the first grant')
-        assert.equal(afterSettings.inputStarts,beforeSettings.inputStarts + 1)
-        assert.equal(afterSettings.manualInputAttempts,beforeSettings.manualInputAttempts)
+        await viewer.waitForFunction(() => document.querySelector('#permission-state').textContent.includes('可控制'),null,{timeout:40000})
+        const afterGrant = await readCaptureQA()
+        assert.equal(afterGrant.inputPrompts,beforeGrant.inputPrompts)
+        assert.equal(afterGrant.inputSettingsOpened,beforeGrant.inputSettingsOpened)
+        assert(afterGrant.inputChecks > beforeGrant.inputChecks,'The active share must silently observe an external grant without focus or opening settings')
+        assert.equal(afterGrant.inputStarts,beforeGrant.inputStarts + 1)
+        assert.equal(afterGrant.manualInputAttempts,beforeGrant.manualInputAttempts)
         assert(await host.evaluate(() => inputSettingsWatch === null))
         await host.evaluate(() => window.removeEventListener('focus',window.qaSuppressFocus,true))
         assert.equal(await liveTrack(),track)
@@ -814,8 +825,8 @@ async function run() {
         await host.waitForFunction(() => !inputReportRead && !room.retryingInput)
         assert.equal((await readCaptureQA()).inputAttempts,revokedAttempts)
         assert.match(await viewer.locator('#permission-state').innerText(),/等待共享端启用键鼠/)
-        // Only the host's click may ask for permission from the input process
-        // that will stay alive and post events. Keep its OS response pending.
+        // Only the host's click may ask for access while a revoked session
+        // waits for a new authorization. Keep the OS response pending.
         await setCaptureQA({inputPermission:'denied',inputStartupPermission:'denied',holdInputPrompt:true})
         await host.locator('#retry-input').click()
         await host.waitForFunction(() => room.retryingInput && document.querySelector('#retry-input').disabled)
@@ -824,16 +835,19 @@ async function run() {
             if (session.defaultSession.answerInputPrompt) return
             await new Promise(resolve => setTimeout(resolve,50))
           }
-          throw Error('Manual retry did not request input access from the event-posting helper')
+          throw Error('Manual retry did not request input access from the host application')
         })
+        assert.equal(await host.locator('#retry-input').innerText(),'正在启用键鼠控制…')
+        await viewer.waitForFunction(() => document.querySelector('#permission-state').textContent === '仅观看 · 共享端正在启用键鼠')
         const pending = await readCaptureQA()
-        assert.equal(pending.sessionInputPrompts,afterSettings.sessionInputPrompts + 1)
+        assert.equal(pending.sessionInputPrompts,afterGrant.sessionInputPrompts + 1)
         assert.equal(pending.inputStarts,recovered.inputStarts)
         assert.match(await viewer.locator('#permission-state').innerText(),/仅观看/)
         await viewer.locator('#remote-video').click()
         await viewer.keyboard.press('KeyV')
         await apps[0].evaluate(({session}) => {
           const ses = session.defaultSession
+          ses.captureQA.inputPermission = 'granted'
           ses.captureQA.inputStartupPermission = 'granted'
           ses.captureQA.holdInputPrompt = false
           ses.answerInputPrompt()
@@ -866,9 +880,35 @@ async function run() {
         await waitForNotice('session-notice','仅共享画面')
         assert.match(await viewer.locator('#permission-state').innerText(),/仅观看/)
         assert.equal((await readCaptureQA()).inputStarts,recovered.inputStarts+2)
+        assert.equal(await host.evaluate(() => savedSharing().control),true,'Selecting an unmapped display must retain the checkbox preference for the next local share')
         await stop()
         await setCaptureQA({nativeDisplayId:900001})
-        console.log('Verified view-only video after denial, a permission request from the input helper on a host click, input only after approval, revocation, and silent reconnection.')
+        // Start again with the saved preference, and keep the host's OS dialog
+        // unanswered until the returning viewer has already decoded video.
+        await fixture.waitForHostSlot()
+        await setCaptureQA({inputPermission:'denied',inputStartupPermission:'denied',holdInputPrompt:true})
+        const beforePrompt = await readCaptureQA()
+        await hostButton.click()
+        await connectWithCode()
+        await waitForVideo()
+        await viewer.waitForFunction(() => document.querySelector('#permission-state').textContent.includes('共享端需授权键鼠'))
+        assert(await apps[0].evaluate(({session}) => typeof session.defaultSession.answerInputPrompt === 'function'))
+        const waitingForOS = await readCaptureQA()
+        assert.equal(waitingForOS.inputPrompts,beforePrompt.inputPrompts + 1)
+        assert.equal(waitingForOS.inputStarts,beforePrompt.inputStarts)
+        const waitingTrack = await liveTrack()
+        await host.evaluate(() => window.addEventListener('focus',window.qaSuppressFocus,true))
+        await setCaptureQA({inputPermission:'granted',inputStartupPermission:'granted',holdInputPrompt:false})
+        await apps[0].evaluate(({session}) => session.defaultSession.answerInputPrompt())
+        await viewer.waitForFunction(() => document.querySelector('#permission-state').textContent.includes('可控制'),null,{timeout:15000})
+        await host.evaluate(() => window.removeEventListener('focus',window.qaSuppressFocus,true))
+        assert.equal(await liveTrack(),waitingTrack)
+        const finishedPrompt = await readCaptureQA()
+        assert.equal(finishedPrompt.inputPrompts,waitingForOS.inputPrompts)
+        assert.equal(finishedPrompt.inputStarts,beforePrompt.inputStarts + 1)
+        assert.equal(finishedPrompt.manualInputAttempts,beforePrompt.manualInputAttempts)
+        await stop()
+        console.log('Verified view-only video after denial, an input request from the sharing app on a host click, input only after approval, revocation, and silent reconnection.')
         // The settings dialog can observe a first grant while the underlying share is still view-only.
         // Closing an in-app dialog is not a window-focus event.
         await fixture.waitForHostSlot()
@@ -967,6 +1007,7 @@ async function run() {
     await host.locator('#allow-control').uncheck()
     await host.locator('#accept').click()
     await joinPublished()
+    assert.equal(await host.evaluate(() => savedSharing().control),false,'Explicitly clearing the checkbox must persist a view-only preference')
     try {
       await waitForVideo()
     } catch (error) {

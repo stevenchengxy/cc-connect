@@ -14,14 +14,14 @@ module.exports = function verifyMacSignatures({ electronPlatformName, appOutDir 
     + ' and certificate leaf = H"' + certificate + '" and ' : ''
   for (const [target, identifier] of [
     [app, 'app.jianping.desktop'],
-    [path.join(native, 'jianping-input'), 'app.jianping.input'],
+    [path.join(native, 'cc-mac-input.node'), 'app.jianping.input'],
     [path.join(native, 'CC Connect Screen.app'), 'app.jianping.screen']
   ]) {
     execFileSync('/usr/bin/codesign', [...verify, '-R=' + signer + 'identifier "' + identifier + '"', target])
   }
-  // Both native executables already carry the signatures from build-native.
+  // The native components already carry the signatures from build-native.
   // Re-signing with the same identifier can still replace their entitlements.
-  for (const relative of ['jianping-input', 'CC Connect Screen.app/Contents/MacOS/cc-connect-screen']) {
+  for (const relative of ['cc-mac-input.node', 'CC Connect Screen.app/Contents/MacOS/cc-connect-screen']) {
     const original = readFileSync(path.join(__dirname, '..', 'native', 'bin', relative))
     if (!original.equals(readFileSync(path.join(native, relative)))) {
       throw new Error('Packaged native executable differs from the signed original: ' + relative)
