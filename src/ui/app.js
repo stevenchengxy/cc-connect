@@ -26,7 +26,8 @@ let legacyInvite = '';
 let settingsCheck = null;
 let lastNativeTest = null;
 let inputPermission = null;
-let inputReadId = 0;
+let inputReportRead = null;
+let inputSettingsWatch = null;
 let settingsViewId = 0;
 let rotatingDeviceCode = false;
 let expiryTimer;
@@ -234,7 +235,7 @@ function syncHome() {
   const saved = savedSharing();
   $('host-options').hidden = !canPair || !saved;
   $('host-files').hidden = !canPair;
-  const scope = shareScopeText(preparedHost?.choice || saved,preparedHost?.inputStatus);
+  const scope = shareScopeText(preparedHost?.choice || saved,preparedHost?.inputStatus,preparedHost?.manualInputRetry);
   $('host-scope').textContent = scope;
   $('host-scope').hidden = !scope;
   $('host-input-settings').hidden = phase !== 'listening' || !preparedHost?.choice?.control || preparedHost.inputStatus !== 'denied';
@@ -432,11 +433,11 @@ function savedSharing() {
   } catch { /* Selection is optional on this device. */ }
   return null;
 }
-function shareScopeText(choice, inputStatus) {
+function shareScopeText(choice, inputStatus, manualRetry) {
   if (!choice) return '';
   if (choice.mode === 'files') return t('本次仅允许一位持码成员传输文件。');
   const scope = !choice.control ? '仅观看' : inputStatus === 'denied' ? '仅观看 · 键鼠待授权' :
-    inputStatus === 'unknown' ? '键鼠权限待确认' : '允许键鼠控制';
+    inputStatus === 'unknown' ? '键鼠权限待确认' : manualRetry ? viewOnlyLabels.unavailable : '允许键鼠控制';
   return t('本次共享 · {display} · {scope}', {
     display:choice.name || t('系统选择的屏幕'), scope:t(scope)
   });
@@ -587,23 +588,63 @@ function closeSettings() {
   $('turn-password').value = '';
   if (settingsCheck?.nativeTest && settingsCheck.pending) void api.cancelNativeDisplayTest().catch(() => {});
   settingsCheck = null;
-  inputReadId++;
   $('settings-dialog').close();
 }
 $('close-settings').onclick = closeSettings;
 $('cancel-settings').onclick = closeSettings;
 $('settings-dialog').oncancel = event => { event.preventDefault(); closeSettings(); };
-async function refreshInputPermission() {
-  if (info.platform !== 'darwin' || !$('settings-dialog').open) return;
-  const id = ++inputReadId;
-  let status;
-  try { status = await api.inputStatus(); }
-  catch { status = 'unknown'; }
-  if (id !== inputReadId || !$('settings-dialog').open) return;
-  inputPermission = status;
-  renderScreenCheck();
+async function refreshInputPermission(retryGranted = false, stillOpen) {
+  if (info.platform !== 'darwin') return;
+  const settings = $('settings-dialog').open;
+  const view = settingsViewId;
+  const value = room;
+  const revision = value?.inputRevision;
+  const draft = preparedHost;
+  const requestId = draft?.requestId;
+  const consent = $('consent').open && !$('consent-input-settings').hidden ? pendingRequest : null;
+  const waiting = phase === 'listening' && draft?.choice?.control;
+  const recovering = !settings && value?.role === 'host' && value.canRetryInput && value.captureReady && !value.allowControl && !value.retryingInput;
+  if (!settings && !waiting && !recovering && !consent) return;
+  // A focus notification and a scheduled check can arrive together.
+  const target = settings ? view : consent || (waiting ? requestId : value);
+  if (!inputReportRead || inputReportRead.target !== target || inputReportRead.revision !== revision) {
+    const read = inputReportRead = {target,revision};
+    read.result = api.inputStatus(true).catch(() => ({status:'unknown'})).finally(() => {
+      if (inputReportRead === read) inputReportRead = null;
+    });
+  }
+  const report = await inputReportRead.result;
+  if (!report || (stillOpen && !stillOpen()) || room !== value || preparedHost !== draft || draft?.requestId !== requestId ||
+      value?.inputRevision !== revision || view !== settingsViewId || settings !== $('settings-dialog').open ||
+      (waiting && phase !== 'listening') || (consent && consent !== pendingRequest)) return;
+  if (report.status === 'granted' && inputSettingsWatch?.current()) stopInputWatch(inputSettingsWatch);
+  if (settings) {
+    inputPermission = report;
+    renderScreenCheck();
+  }
+  if (consent && $('consent').open && !$('consent-input-settings').hidden && report.status === 'granted') {
+    $('consent-input-settings').hidden = true;
+    notice('consent-notice','键鼠控制已获辅助功能授权。');
+  }
+  if (waiting) {
+    draft.inputStatus = report.status;
+    syncHome();
+  }
+  if (!recovering || value.allowControl || value.retryingInput) return;
+  if (retryGranted && value.retryAfterGrant && report.status === 'granted') {
+    await retryHostInput(value);
+    return;
+  }
+  // A fresh check can update the explanation. Only a live input service can grant control.
+  if (report.status !== value.inputStatus) {
+    const wasDenied = value.inputStatus === 'denied';
+    value.inputStatus = report.status;
+    if (draft && draft === preparedHost && draft.id === value.shareId) draft.inputStatus = report.status;
+    sharePermission(value);
+    if (wasDenied && report.status === 'granted') notice('session-notice','已检测到键鼠权限，点「启用键鼠控制」恢复本次连接。');
+  }
 }
-window.addEventListener('focus',() => { void refreshInputPermission(); });
+window.addEventListener('focus',() => { void refreshInputPermission(true); });
 function renderScreenCheck() {
   const check = settingsCheck;
   const restricted = check?.errorCode === 'permission-restricted';
@@ -616,17 +657,20 @@ function renderScreenCheck() {
   $('settings-screen-settings').hidden = !needsRecordingSettings(check?.errorCode);
   const inputMessages = {
     granted:'键鼠控制已获辅助功能授权。',
-    denied:'键鼠控制需要辅助功能授权。如果 macOS 要求管理员确认，请联系这台 Mac 的管理员。',
+    denied:inputPermission?.appTrusted === true ? '当前应用已获辅助功能授权，但 macOS 仍未允许键鼠组件发送输入。' : 'macOS 尚未允许当前运行的应用控制键鼠。',
     unknown:'无法检查键鼠组件，请确认已完整安装 CC Connect。'
   };
-  const inputMessage = info.platform === 'darwin' ? inputMessages[inputPermission] :
+  const inputMessage = info.platform === 'darwin' ? inputMessages[inputPermission?.status] :
     info.inputSupported ? '在共享请求中允许键鼠控制。' : '本机仅支持观看。';
-  $('input-check-result').textContent = inputMessage ? t(inputMessage) : '';
+  const denied = inputPermission?.status === 'denied';
+  const hint = denied && inputPermission.appPath ? t('如果「辅助功能」中的开关已经打开，请移除 CC Connect 旧条目，重新添加下方路径的应用并开启权限，再按系统提示退出并重新打开。') : '';
+  $('input-check-result').textContent = [inputMessage && t(inputMessage),hint].filter(Boolean).join(' ');
   $('input-check-result').hidden = !inputMessage;
-  $('settings-input-settings').hidden = inputPermission !== 'denied';
-  const showPath = check?.appPath && (needsRecordingSettings(check?.errorCode) || inputPermission === 'denied');
+  $('settings-input-settings').hidden = !denied;
+  const appPath = inputPermission?.appPath || check?.appPath;
+  const showPath = appPath && (needsRecordingSettings(check?.errorCode) || denied);
   $('checked-app-path').hidden = !showPath;
-  $('checked-app-path').textContent = showPath ? t('当前运行的应用：{path}', {path:check.appPath}) : '';
+  $('checked-app-path').textContent = showPath ? t('当前运行的应用：{path}', {path:appPath}) : '';
   const history = $('screen-native-history');
   history.hidden = !lastNativeTest || restricted || check?.nativeResult === lastNativeTest;
   if (!history.hidden) {
@@ -708,18 +752,42 @@ async function openRecordingSettings(noticeId) {
 $('settings-screen-settings').onclick = () => openRecordingSettings('screen-check-result');
 $('consent-screen-settings').onclick = () => openRecordingSettings('consent-notice');
 $('session-screen-settings').onclick = () => openRecordingSettings('session-notice');
+function stopInputWatch(watch) {
+  if (watch !== inputSettingsWatch) return;
+  clearTimeout(watch.timer);
+  inputSettingsWatch = null;
+}
 async function openInputSettings(noticeId) {
   const viewId = settingsViewId;
-  const settings = noticeId === 'input-check-result';
   const owner = room;
   const draft = preparedHost;
-  const visible = () => settings ? $('settings-dialog').open && viewId === settingsViewId :
-    noticeId === 'session-notice' ? isCurrent(owner) :
-    noticeId === 'home-notice' ? draft && preparedHost === draft && phase === 'listening' : $('consent').open;
+  const peerId = draft?.requestId;
+  const request = pendingRequest;
+  const token = generation;
+  const visible = () => {
+    if (generation !== token || room !== owner || preparedHost !== draft || draft?.requestId !== peerId) return false;
+    if (noticeId === 'input-check-result') return $('settings-dialog').open && settingsViewId === viewId;
+    if (noticeId === 'session-notice') return owner?.role === 'host' && !owner.allowControl && !$('settings-dialog').open;
+    if (noticeId === 'home-notice') return phase === 'listening' && !$('settings-dialog').open;
+    return $('consent').open && pendingRequest === request;
+  };
+  if (!visible() || (inputSettingsWatch?.opening && inputSettingsWatch.current())) return;
+  if (inputSettingsWatch) stopInputWatch(inputSettingsWatch);
+  const deadline = Date.now() + 120_000;
+  const watch = inputSettingsWatch = {opening:true, current:() => inputSettingsWatch === watch && Date.now() < deadline && visible()};
+  async function check() {
+    if (watch.current()) await refreshInputPermission(noticeId === 'session-notice',watch.current);
+    if (watch.current()) watch.timer = setTimeout(check,2500);
+    else stopInputWatch(watch);
+  }
   try {
     await api.openInputSettings();
-    if (settings && visible() && document.hasFocus()) void refreshInputPermission();
-  } catch { if (visible()) notice(noticeId,'无法打开辅助功能设置。',true); }
+    watch.opening = false;
+    await check();
+  } catch {
+    if (watch.current()) notice(noticeId,'无法打开辅助功能设置。',true);
+    stopInputWatch(watch);
+  }
 }
 $('settings-input-settings').onclick = () => openInputSettings('input-check-result');
 $('consent-input-settings').onclick = () => openInputSettings('consent-notice');
@@ -1065,13 +1133,14 @@ function controlUnavailable(value, message, details = {}) {
     }).catch(() => {});
   }
   if (details.inputStatus) value.inputStatus = details.inputStatus;
+  value.retryAfterGrant = details.retryOnReconnect === true;
   if (details.canRetry !== undefined) value.canRetryInput = details.canRetry;
   value.allowControl = false;
   sharePermission(value);
   notice('session-notice', message || '键鼠控制暂时不可用，已切换为仅观看。', true);
 }
-$('retry-input').onclick = async () => {
-  const value = room;
+$('retry-input').onclick = () => retryHostInput(room);
+async function retryHostInput(value) {
   if (value?.role !== 'host' || !value.canRetryInput || !value.captureReady || value.allowControl || value.retryingInput) return;
   const revision = value.inputRevision;
   value.retryingInput = true;
@@ -1081,7 +1150,11 @@ $('retry-input').onclick = async () => {
     if (!isCurrent(value) || revision !== value.inputRevision || result?.allowControl !== true) return;
     value.allowControl = true;
     value.inputStatus = 'granted';
-    if (preparedHost && preparedHost.id === value.shareId) preparedHost.inputStatus = 'granted';
+    value.retryAfterGrant = false;
+    if (preparedHost && preparedHost.id === value.shareId) {
+      preparedHost.inputStatus = 'granted';
+      preparedHost.manualInputRetry = false;
+    }
     if (value.nativePicker) value.embeddedPointer = result.nativeCursorEmbedded === true;
     else value.embeddedPointer = ['always','motion'].includes(value.stream?.getVideoTracks()[0]?.getSettings().cursor);
     sharePermission(value);
@@ -1094,7 +1167,7 @@ $('retry-input').onclick = async () => {
     value.retryingInput = false;
     if (isCurrent(value)) showPermission(value);
   }
-};
+}
 function setQuality(id) {
   if (!Object.hasOwn(profiles,id)) return;
   quality = id;
@@ -1554,7 +1627,11 @@ async function capture(value) {
       if (track.readyState !== 'live') { void stopForSourceError(value,'本机屏幕共享已停止。'); return; }
       value.allowControl = allowControl === true && revision === value.inputRevision;
       value.captureReady = true;
-      if (value.allowControl && preparedHost && preparedHost.id === value.shareId) preparedHost.inputStatus = 'granted';
+      if (value.allowControl) value.inputStatus = 'granted';
+      if (value.allowControl && preparedHost && preparedHost.id === value.shareId) {
+        preparedHost.inputStatus = 'granted';
+        preparedHost.manualInputRetry = false;
+      }
       sharePermission(value);
       if (value.nativePicker && value.controlRequested && !value.nativeCapture.matched && !value.allowControl) {
         notice('session-notice','无法确认所选显示器的键鼠坐标，本次仅共享画面。');
@@ -1798,6 +1875,7 @@ async function handleEvent(event) {
     case 'control-unavailable':
       if (preparedHost?.continuous && event.shareId === preparedHost.id && event.requestId === preparedHost.requestId) {
         preparedHost.inputStatus = event.inputStatus;
+        preparedHost.manualInputRetry = !event.retryOnReconnect;
         syncHome();
       }
       if (room?.role === 'host' && (!event.requestId || room.requestId === event.requestId)) controlUnavailable(room,event.message,event);

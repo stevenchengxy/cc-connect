@@ -463,6 +463,11 @@ function roomFiles(requestId) {
   return active.files
 }
 
+function runningMacBundlePath() {
+  const bundle = path.resolve(path.dirname(app.getPath('exe')), '../..')
+  return path.extname(bundle).toLowerCase() === '.app' ? bundle : null
+}
+
 function registerHandlers() {
   handle('file-pick', id => roomFiles(id).pick())
   handle('file-save', (id, offer) => roomFiles(id).save(offer))
@@ -503,10 +508,19 @@ function registerHandlers() {
       return result
     } finally { codeRotation = null }
   })
-  handle('input-status', () => process.platform === 'darwin' ? InputBridge.macAccess(nativeOptions, false) : null)
+  handle('input-status', async details => {
+    if (process.platform !== 'darwin') return null
+    const status = await InputBridge.macAccess(nativeOptions, false)
+    if (details !== true) return status
+    // Accessibility trust belongs to the main app. Only the input helper
+    // can report whether macOS actually lets it post keyboard and mouse events.
+    let appTrusted = null
+    try { appTrusted = systemPreferences.isTrustedAccessibilityClient(false) } catch { /* Keep the helper result. */ }
+    return { status, appTrusted, appPath:runningMacBundlePath() }
+  })
   handle('screen-status', async () => {
     const { report } = await capture.inspect(true)
-    const appPath = process.platform === 'darwin' && app.isPackaged ? path.resolve(path.dirname(app.getPath('exe')), '../..') : null
+    const appPath = process.platform === 'darwin' && app.isPackaged ? runningMacBundlePath() : null
     return { ...report, appPath }
   })
   handle('open-input-settings', async () => {

@@ -87,21 +87,23 @@ class RemoteInput {
     if (kind === 'move') {
       if (!Number.isSafeInteger(sequence) || sequence <= this.appliedSequence ||
           ![payload.x, payload.y].every(n => Number.isFinite(n) && n >= 0 && n <= 1)) return;
-      if (boundary > this.appliedBoundary) {
+      if (fromMotion && boundary > this.appliedBoundary) {
         // A drag sample may outrun its button-down. Keep only the freshest future position.
         if (!this.pending || this.pending.sequence < sequence) this.pending = payload;
         return;
       }
       this.appliedSequence = sequence;
-      this.apply(payload);
-    } else if (!fromMotion && boundary > this.appliedBoundary) {
-      this.appliedBoundary = boundary;
-      this.apply(payload);
-      const pending = this.pending;
-      if (pending && pending.boundary <= boundary) {
-        this.pending = null;
-        this.receive(pending, true);
-      }
+    } else if (fromMotion || boundary === this.appliedBoundary) {
+      return;
+    }
+    // An ordered sample follows every prior button or key on this channel.
+    // After an input grant resumes, those transitions may have been discarded.
+    this.appliedBoundary = boundary;
+    this.apply(payload);
+    const pending = this.pending;
+    if (pending && pending.boundary <= boundary) {
+      this.pending = null;
+      this.receive(pending, true);
     }
   }
 

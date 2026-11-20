@@ -57,7 +57,7 @@ function installSyntheticPicker(ses,qa) {
 app.whenReady().then(async () => {
   const ses = session.defaultSession
   const captureQA = ses.captureQA = {screenPermission:'granted',listCalls:0,listFails:false,noDisplays:false,
-    pickerCalls:0,cancelPicker:false,inputPermission:'granted',inputStartupPermission:null,inputChecks:0,inputPrompts:0,inputSettingsOpened:0,inputAttempts:0,inputStarts:0,inputEvents:[],
+    pickerCalls:0,cancelPicker:false,inputPermission:'granted',appTrusted:true,inputStartupPermission:null,inputChecks:0,inputPrompts:0,inputSettingsOpened:0,inputAttempts:0,inputStarts:0,inputEvents:[],
     nativeStarts:0,nativeStops:0,nativeActive:0,nativeFrames:0,nativeDisplayId:900001,
     cancelNativePicker:false,roomRequests:0}
   installSyntheticPicker(ses,captureQA)
@@ -103,6 +103,10 @@ app.whenReady().then(async () => {
       if (request) captureQA.inputPrompts++
       else captureQA.inputChecks++
       return captureQA.inputPermission
+    }
+    systemPreferences.isTrustedAccessibilityClient = prompt => {
+      if (prompt !== false) captureQA.inputPrompts++
+      return captureQA.appTrusted
     }
     const openExternal = shell.openExternal.bind(shell)
     shell.openExternal = async url => {

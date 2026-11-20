@@ -4,6 +4,10 @@ const path = require('node:path')
 module.exports = async context => {
   if (context.electronPlatformName !== 'darwin') return
   const resources = path.join(context.appOutDir, 'CC Connect.app', 'Contents', 'Resources')
+  // The universal merger rewrites nested Info.plist files with Electron ASAR
+  // metadata. Restore the plist sealed by the native screen helper's signature.
+  const screenPlist = path.join('native', 'bin', 'CC Connect Screen.app', 'Contents', 'Info.plist')
+  await fs.copyFile(path.join(__dirname, '..', screenPlist), path.join(resources, screenPlist))
   const descriptions = {
     en: [
       'CC Connect uses your local network to pair with a computer you invite.',

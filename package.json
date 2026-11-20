@@ -1,6 +1,6 @@
 {
   "name": "cc-connect",
-  "version": "0.4.12",
+  "version": "0.4.13",
   "description": "CC Connect remote desktop",
   "author": "CC Connect",
   "private": true,
@@ -9,7 +9,7 @@
     "start": "node scripts/build-native.cjs && electron .",
     "test": "node --test",
     "native": "node scripts/build-native.cjs",
-    "dist:mac": "npm run native && electron-builder --mac dmg --universal -c.mac.identity=- --publish never",
+    "dist:mac": "npm run native && electron-builder --mac dmg --universal -c.mac.identity=- -c.forceCodeSigning=true --publish never",
     "dist:mac:signed": "node scripts/build-signed-mac.cjs",
     "dist:win": "npm run native && electron-builder --win nsis --x64 --publish never",
     "test:desktop": "node scripts/verify-desktop.cjs",
@@ -41,6 +41,10 @@
     "mac": {
       "category": "public.app-category.utilities",
       "icon": "build/icon.icns",
+      "signIgnore": [
+        "/Contents/Resources/native/bin/jianping-input$",
+        "/Contents/Resources/native/bin/CC Connect Screen\\.app(?:/|$)"
+      ],
       "extraResources": [
         {
           "from": "native/bin",
@@ -90,6 +94,7 @@
     },
     "beforePack": "scripts/check-package.cjs",
     "afterPack": "scripts/localize-macos.cjs",
+    "afterSign": "scripts/verify-mac-signatures.cjs",
     "nsis": {
       "oneClick": true,
       "perMachine": false,

@@ -91,6 +91,29 @@ test('sustained loss during continuous movement yields fresh reliable positions 
   input.close();
 });
 
+test('ordered positions resume motion after transitions were discarded in view-only mode', () => {
+  const applied = [];
+  let allowed = true;
+  const host = new RemoteInput(link(), p => applied.push(p), () => allowed);
+  const sample = (x, sequence, boundary) => ({...move(x), sequence, boundary});
+  host.receive(sample(0.1, 1, 0));
+  allowed = false;
+  host.receive({...button(true), boundary:1});
+  host.receive({...button(false), boundary:2});
+  host.receive(sample(0.2, 2, 2), true);
+
+  allowed = true;
+  host.receive(sample(0.5, 4, 2), true);
+  assert.equal(applied.length, 1);
+  host.receive(sample(0.4, 3, 2)); // Ordered recovery confirms the skipped boundaries.
+  host.receive(sample(0.5, 4, 2)); // A duplicate recovery cannot replay the cached move.
+  host.receive(sample(0.6, 5, 2), true);
+  assert.deepEqual(applied.map(p => [p.kind, p.x]), [
+    ['move', 0.1], ['move', 0.4], ['move', 0.5], ['move', 0.6]
+  ]);
+  host.close();
+});
+
 test('congested reliable recovery delivers only the latest position after draining', t => {
   t.mock.timers.enable({apis:['setTimeout']});
   const control = link();

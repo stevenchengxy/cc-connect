@@ -2,6 +2,7 @@
 
 const { execFileSync } = require('node:child_process')
 const path = require('node:path')
+const verifyMacSignatures = require('./verify-mac-signatures.cjs')
 
 async function buildSignedMac() {
   if (process.platform !== 'darwin') throw new Error('Developer ID builds require macOS.')
@@ -27,23 +28,10 @@ async function buildSignedMac() {
       mac: {
         identity: certificate, type: 'distribution', hardenedRuntime: true,
         // Keep the fingerprint when two valid certificates have the same display name.
-        sign: options => require('@electron/osx-sign').signAsync({ ...options, identity: certificate }),
-        // The bare input tool was signed above with its permanent identifier.
-        // osx-sign otherwise replaces it with one derived from the build's Mach-O UUID.
-        signIgnore: ['/Contents/Resources/native/bin/jianping-input$']
+        sign: options => require('@electron/osx-sign').signAsync({ ...options, identity: certificate })
       },
-      afterSign({ appOutDir }) {
-        const app = path.join(appOutDir, 'CC Connect.app')
-        execFileSync('/usr/bin/codesign', ['--verify', '--all-architectures', '--deep', '--strict', app])
-        for (const [relative, identifier] of [
-          ['', 'app.jianping.desktop'],
-          ['Contents/Resources/native/bin/jianping-input', 'app.jianping.input'],
-          ['Contents/Resources/native/bin/CC Connect Screen.app', 'app.jianping.screen']
-        ]) {
-          const requirement = 'anchor apple generic and certificate leaf[field.1.2.840.113635.100.6.1.13] exists'
-            + ' and certificate leaf = H"' + certificate + '" and identifier "' + identifier + '"'
-          execFileSync('/usr/bin/codesign', ['--verify', '--all-architectures', '--strict', '-R=' + requirement, path.join(app, relative)])
-        }
+      afterSign(context) {
+        verifyMacSignatures(context, certificate)
         verified = true
       },
       artifactBuildStarted() {
