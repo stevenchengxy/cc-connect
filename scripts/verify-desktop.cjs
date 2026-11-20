@@ -520,17 +520,45 @@ async function run() {
       }
       if (supportsInput) {
         await viewer.waitForFunction(() => document.querySelector('#permission-state').textContent.includes('可控制'))
-        await viewer.locator('#remote-video').click()
+        const picture = viewer.locator('#remote-video')
+        await picture.scrollIntoViewIfNeeded()
+        const box = await picture.boundingBox()
+        const {width,height} = await picture.evaluate(v => ({width:v.videoWidth,height:v.videoHeight}))
+        const scale = Math.min(box.width/width,box.height/height)
+        const image = {w:scale*width,h:scale*height}
+        const left = box.x + (box.width-image.w)/2, top = box.y + (box.height-image.h)/2
+        let offset = beforeConnect.inputEvents.length
+        for (const [x,y] of [[0.2,0.35],[0.75,0.65]]) {
+          // Drive the renderer with real mouse events. Resend motion in a
+          // tiny neighborhood because individual hover packets may be lost.
+          let arrived = false
+          for (let attempt=0; attempt<15 && !arrived; attempt++) {
+            await viewer.mouse.move(left+x*image.w+(attempt%2), top+y*image.h,{steps:3})
+            await delay(150)
+            const {inputEvents} = await readCaptureQA()
+            arrived = inputEvents.slice(offset).some(e => e.kind === 'move' && Math.abs(e.x-x)<0.015 && Math.abs(e.y-y)<0.015)
+            if (arrived) offset = inputEvents.length
+          }
+          assert(arrived,`No remote pointer movement near (${x}, ${y})`)
+        }
+        await viewer.mouse.click(left+0.75*image.w,top+0.65*image.h)
         await viewer.keyboard.press('KeyM')
         await apps[0].evaluate(async ({session},offset) => {
           for (let i=0; i<100; i++) {
             const events = session.defaultSession.captureQA.inputEvents.slice(offset)
-            if (events.some(e => e.kind === 'button' && e.down) &&
-                events.some(e => e.kind === 'key' && e.code === 'KeyM' && !e.down)) return
+            const inputs = events.filter(e => e.kind === 'button' || (e.kind === 'key' && e.code === 'KeyM'))
+            if (inputs.length >= 4) {
+              const [down,up,keyDown,keyUp] = inputs
+              if (down.kind === 'button' && down.button === 0 && down.down &&
+                  up.kind === 'button' && up.button === 0 && !up.down &&
+                  [down,up].every(e => Math.abs(e.x-0.75)<0.015 && Math.abs(e.y-0.65)<0.015) &&
+                  keyDown.kind === 'key' && keyDown.down && keyUp.kind === 'key' && !keyUp.down) return
+              throw Error('The host received reordered input or a click outside the selected position')
+            }
             await new Promise(resolve => setTimeout(resolve,50))
           }
           throw Error('An explicitly control-enabled code failed to deliver keyboard and mouse input')
-        },beforeConnect.inputEvents.length)
+        },offset)
       }
       if (throttling) {
         await throttling.send('Network.emulateNetworkConditionsByRule',{matchedNetworkConditions:[]})
@@ -621,9 +649,10 @@ async function run() {
         const reconnectCode = await connectWithCode()
         await waitForVideo()
         await waitForNotice('session-notice','辅助功能')
-        assert.match(await viewer.locator('#permission-state').innerText(),/仅观看/)
+        await viewer.waitForFunction(() => document.querySelector('#permission-state').textContent.includes('共享端需授权键鼠'),null,{timeout:15000})
         await viewer.locator('#remote-video').click()
         await viewer.keyboard.press('KeyZ')
+        await delay(300)
         const denied = await readCaptureQA()
         assert.equal(denied.inputAttempts,beforeDenied.inputAttempts+1)
         assert.equal(denied.inputStarts,beforeDenied.inputStarts)
@@ -797,7 +826,12 @@ async function run() {
     assert(await viewer.locator('#update-button').isDisabled())
     assert.equal(await viewer.locator('#advanced-settings').isVisible(), false)
     await viewer.locator('#close-settings').click()
-    assert.match(await viewer.locator('#permission-state').textContent(), /仅观看/)
+    await viewer.waitForFunction(() => document.querySelector('#permission-state').textContent.includes('共享端未开启键鼠'),null,{timeout:15000})
+    const beforeViewOnly = (await readCaptureQA()).inputEvents.length
+    await viewer.locator('#remote-video').click()
+    await viewer.keyboard.press('KeyZ')
+    await delay(300)
+    assert.equal((await readCaptureQA()).inputEvents.length,beforeViewOnly)
     assert(await host.locator('#retry-input').isHidden())
     await assert.rejects(host.evaluate(() => window.jianping.retryInput(room.requestId)),/连接请求已失效/)
     await viewer.locator('#live-quality').selectOption('smooth')

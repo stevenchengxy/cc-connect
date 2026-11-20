@@ -12,14 +12,6 @@ func fail(_ message: String) -> Never {
     exit(1)
 }
 
-func isActiveDisplay(_ display: CGDirectDisplayID) -> Bool {
-    var count: UInt32 = 0
-    guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else { return false }
-    var displays = Array(repeating: CGDirectDisplayID(0), count: Int(count))
-    guard CGGetActiveDisplayList(count, &displays, &count) == .success else { return false }
-    return displays.prefix(Int(count)).contains(display)
-}
-
 let arguments = Array(CommandLine.arguments.dropFirst())
 if arguments == ["--check"] {
     reply(CGPreflightPostEventAccess() ? "ALLOWED" : "DENIED")
@@ -30,7 +22,7 @@ if arguments == ["--request-access"] {
     exit(0)
 }
 guard arguments.count == 1, let display = CGDirectDisplayID(arguments[0]),
-      isActiveDisplay(display) else {
+      CGDisplayIsActive(display) != 0 else {
     fail("所选显示器不可用。")
 }
 guard CGPreflightPostEventAccess() else {
@@ -124,7 +116,10 @@ func normalizedPoint(_ x: Substring, _ y: Substring) -> CGPoint? {
 
 reply("READY")
 while let line = readLine() {
-    if !isActiveDisplay(display) { break }
+    if CGDisplayIsActive(display) == 0 {
+        reply("ERROR 所选显示器不可用。")
+        break
+    }
     if line == "check-access" {
         if !CGPreflightPostEventAccess() {
             reply("ERROR control-permission")

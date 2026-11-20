@@ -139,14 +139,39 @@ class InputBridge extends EventEmitter {
     if (!session?.ready || session.stopping || !session.child.stdin.writable) return false;
     const line = encodeInput(data);
     if (line === null) return false;
+    const stdin = session.child.stdin;
+    if (data.kind === 'move') {
+      // A burst after network jitter needs only its most recent position.
+      // Keep at most one move waiting behind the active pipe write.
+      if (session.writingMove) session.pendingMove = line;
+      else this.writeMove(session, line);
+      return true;
+    }
+    // Preserve positions on opposite sides of key/button transitions and
+    // prevent old write callbacks from replaying a pre-click position.
+    session.writingMove = null;
+    if (session.pendingMove && (data.kind === 'key' || data.kind === 'wheel')) stdin.write(session.pendingMove + '\n');
+    session.pendingMove = null;
     // Dropping release events could leave keys pressed. Close and reset on overload.
     if (session.child.stdin.writableLength > 4096) {
       this.stop();
       this.emit('error', new Error('键鼠输入积压，已停止控制。'));
       return false;
     }
-    session.child.stdin.write(line + '\n');
+    stdin.write(line + '\n');
     return true;
+  }
+
+  writeMove(session, line) {
+    const written = () => {
+      if (this.session !== session || session.stopping || session.writingMove !== written) return;
+      session.writingMove = null;
+      const next = session.pendingMove;
+      session.pendingMove = null;
+      if (next && session.child.stdin.writable) this.writeMove(session, next);
+    };
+    session.writingMove = written;
+    session.child.stdin.write(line + '\n', written);
   }
 
   recheckAccess() {

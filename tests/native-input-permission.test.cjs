@@ -46,3 +46,29 @@ test('an unresponsive input helper closes as unavailable, distinct from a denied
   assert.match((await error)[0].message,/仅观看/)
   assert.equal(bridge.session,null)
 })
+
+test('a burst of pointer positions keeps the last move, preserves key order and never replays a move after a click', () => {
+  const bridge = new InputBridge()
+  const writes = [], callbacks = []
+  const stdin = { writable:true, writableLength:0, write(line, callback) {
+    writes.push(line.trim())
+    if (callback) callbacks.push(callback)
+  } }
+  bridge.session = {ready:true, child:{stdin}}
+  const move = x => bridge.send({kind:'move', x, y:0})
+  for (let i = 0; i <= 500; i++) move(i / 500)
+  assert.deepEqual(writes, ['move 0.000000 0.000000'])
+  callbacks.shift()()
+  assert.equal(writes.at(-1), 'move 1.000000 0.000000')
+  move(0.2)
+  assert.ok(bridge.send({kind:'button', down:true, button:0, x:0.4, y:0}))
+  move(0.5)
+  move(0.6)
+  callbacks.shift()()
+  assert.equal(writes.at(-1), 'move 0.500000 0.000000')
+  if (['darwin','win32'].includes(process.platform)) {
+    assert.ok(bridge.send({kind:'key',code:'KeyA',down:true}))
+    assert.equal(writes.at(-2),'move 0.600000 0.000000')
+    assert.match(writes.at(-1),/^key /)
+  }
+})

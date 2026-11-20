@@ -1020,6 +1020,19 @@ async function rejectRequest() {
 $('consent').oncancel = (event) => { event.preventDefault(); void rejectRequest(); };
 $('reject').onclick = rejectRequest;
 
+const viewOnlyLabels = {
+  off:'仅观看 · 共享端未开启键鼠',
+  permission:'仅观看 · 共享端需授权键鼠',
+  display:'仅观看 · 此画面不支持键鼠',
+  unavailable:'仅观看 · 等待共享端启用键鼠'
+};
+function hostViewOnlyReason(value) {
+  if (value.filesOnly || value.allowControl) return undefined;
+  if (value.systemPicker || value.nativeCapture?.matched === false) return 'display';
+  if (!value.controlRequested && !value.canRetryInput) return 'off';
+  if (value.inputStatus === 'denied') return 'permission';
+  return value.captureReady ? 'unavailable' : undefined;
+}
 function showPermission(value) {
   if (!isCurrent(value)) return;
   $('input-recovery').hidden = !(value.role === 'host' && value.canRetryInput && value.captureReady && !value.allowControl);
@@ -1030,12 +1043,13 @@ function showPermission(value) {
   }
   const modeText = value.filesOnly ? '仅传文件' : value.allowControl
     ? (value.role === 'host' ? '允许键鼠控制' : '可控制 · Shift + Esc 释放键鼠')
-    : '仅观看';
+    : value.role === 'viewer' && Object.hasOwn(viewOnlyLabels,value.viewOnlyReason) ? viewOnlyLabels[value.viewOnlyReason] : '仅观看';
   $('permission-state').textContent = translate(modeText);
   renderIslandDetails();
 }
 function sharePermission(value) {
-  if (value.role === 'host') send(value.channel, {kind:'permission',allowControl:value.allowControl,embeddedPointer:value.embeddedPointer === true});
+  if (value.role === 'host') send(value.channel, {kind:'permission',allowControl:value.allowControl,
+    viewOnlyReason:hostViewOnlyReason(value),embeddedPointer:value.embeddedPointer === true});
   showPermission(value);
 }
 function controlUnavailable(value, message, details = {}) {
@@ -1218,6 +1232,7 @@ function attachChannel(value, channel) {
     if (value.role === 'viewer') {
       if (payload.kind === 'permission') {
         value.allowControl = payload.allowControl === true;
+        value.viewOnlyReason = typeof payload.viewOnlyReason === 'string' ? payload.viewOnlyReason : undefined;
         // Before cursor negotiation, controllable sessions shared the complete
         // desktop with its system cursor, including the native macOS picker.
         value.embeddedPointer = payload.embeddedPointer === true || !Object.hasOwn(payload,'embeddedPointer');
@@ -1696,6 +1711,8 @@ video.addEventListener('wheel',(e) => {
   const point = pointOnVideo(e);
   if (!point) return;
   e.preventDefault();
+  // The wheel event contains its current position. An older queued move must not follow it.
+  cancelMove();
   const scale = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? video.clientHeight : 1;
   sendInput({kind:'wheel',dx:Math.round(e.deltaX*scale),dy:Math.round(e.deltaY*scale),...point});
 },{passive:false});
@@ -1707,6 +1724,10 @@ function sendKey(e, down) {
     return;
   }
   e.preventDefault();
+  if (nextPoint) {
+    sendInput({kind:'move',...nextPoint});
+    cancelMove();
+  }
   sendInput({kind:'key',code:e.code,down});
 }
 video.onkeydown = (e) => sendKey(e,true);

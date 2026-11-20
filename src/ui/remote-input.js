@@ -37,9 +37,23 @@ class RemoteInput {
     catch { return false; }
   }
 
+  scheduleReliableMove() {
+    if (this.settle) return;
+    this.settle = setTimeout(() => {
+      this.settle = null;
+      if (!this.lastSample || this.control.readyState !== 'open') return;
+      if (this.control.bufferedAmount < 1200 && this.write(this.control, this.lastSample)) {
+        this.lastSample = null;
+      } else {
+        this.scheduleReliableMove();
+      }
+    }, 120);
+  }
+
   send(payload) {
-    clearTimeout(this.settle);
     if (payload.kind !== 'move') {
+      clearTimeout(this.settle);
+      this.settle = null;
       if (payload.kind === 'key' && this.lastSample) this.write(this.control, this.lastSample);
       this.lastSample = null;
       const boundary = this.sentBoundary + 1;
@@ -54,12 +68,10 @@ class RemoteInput {
     const sent = channel?.bufferedAmount < 1200 && this.write(channel, sample);
     this.lastSample = null;
     if (fast || !sent) {
-      // A stationary cursor still reaches its final position if the last sample was lost.
+      // Even during continuous motion, recover the latest position if the
+      // unordered channel drops every sample. Never queue a trail of old moves.
       this.lastSample = sample;
-      this.settle = setTimeout(() => {
-        this.lastSample = null;
-        this.write(this.control, sample);
-      }, 120);
+      this.scheduleReliableMove();
     }
     return Boolean(sent);
   }

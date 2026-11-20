@@ -77,3 +77,32 @@ test('congested motion drops samples while clicks stay reliable; permission gate
   assert.deepEqual(applied, ['button']);
   input.close();
 });
+
+test('sustained loss during continuous movement yields fresh reliable positions before the mouse stops', t => {
+  t.mock.timers.enable({apis:['setTimeout']});
+  const control = link(), fast = motion();
+  const input = new RemoteInput(control, () => {}, () => true);
+  input.attach(fast);
+  for (let i = 1; i <= 24; i++) {
+    input.send(move(i / 24));
+    t.mock.timers.tick(10);
+  }
+  assert.deepEqual(control.packets.map(p => p.x), [0.5,1]);
+  input.close();
+});
+
+test('congested reliable recovery delivers only the latest position after draining', t => {
+  t.mock.timers.enable({apis:['setTimeout']});
+  const control = link();
+  const input = new RemoteInput(control, () => {}, () => true);
+  control.bufferedAmount = 2048;
+  input.send(move(0.3));
+  t.mock.timers.tick(120);
+  input.send(move(0.8));
+  t.mock.timers.tick(120);
+  assert.deepEqual(control.packets, []);
+  control.bufferedAmount = 0;
+  t.mock.timers.tick(120);
+  assert.deepEqual(control.packets.map(p => p.x), [0.8]);
+  input.close();
+});
